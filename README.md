@@ -46,16 +46,25 @@ python story_engine.py --seed "A young woman discovers her best friend has been 
 
 The engine ensures that later chapters never forget the photo, the boss's role, or Elena's emotional state.
 
-## License
+## License & Authorization
 
-- **Free for personal / research use.**
-- **Commercial use requires permission.**  
-  Contact: `ai@nohnlins.com`
+This repository is a technical showcase for **Story Engine**. Copyright © 2026 Nohn AI Technology. All rights reserved.
+
+| User | Purpose | License Requirement |
+|---|---|---|
+| Individual (natural person) | Non-commercial academic research / study / personal experimentation | **Free** under the "Free Individual Research License" in [LICENSE](./LICENSE) |
+| Government agency / public institution / enterprise | Any purpose (incl. internal deployment, product development, service provision) | **Requires prior written paid authorization** |
+
+- **Individual researchers**: may use [LICENSE](./LICENSE) free of charge for non-commercial research, but not for any commercial purpose, nor to provide services to any enterprise or government organization.
+- **Government / enterprise users**: before signing a 《Commercial Authorization Agreement》 and paying, may not copy, deploy, run, integrate, or distribute this work.
+- **Apply for authorization**: contact ai@nohnlins.com, stating the nature of the user, intended scenario, and scale.
+
+Full terms are in this repository's [LICENSE](./LICENSE) file. Governing law and dispute resolution are subject to the laws of the People's Republic of China (see LICENSE).
 
 ## Get started
 
 ```bash
-git clone https://github.com/nohn3043-arch/story-engine.git
+git clone https://gitee.com/lin-mingjun-hua_0/story-engine.git
 cd story-engine
 ```
 
