@@ -66,7 +66,7 @@ The licensor, governing law, and dispute resolution are determined by the user's
 ## Get started
 
 ```bash
-git clone https://gitee.com/lin-mingjun-hua_0/story-engine.git
+git clone https://e.gitee.com/nohn-ecosystem/story-engine.git
 cd story-engine
 ```
 
