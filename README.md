@@ -1,93 +1,45 @@
 <p align="center">
-  <em>No plot holes. No character drift. Every thread is tied.</em>
+  <img src="assets/banner.svg" alt="STORY-ENGINE banner" style="width:100%">
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/engine-causal_chain-D4AF37?style=flat-square" alt="causal">
-  <img src="https://img.shields.io/badge/python-3.9+-2C2C2C?style=flat-square" alt="python">
-  <img src="https://img.shields.io/badge/genre-agnostic-2C2C2C?style=flat-square" alt="genre">
+  ![nlp](https://img.shields.io/badge/nlp-D4AF37?style=flat-square)  ![consistency](https://img.shields.io/badge/consistency-D4AF37?style=flat-square)  ![long-form](https://img.shields.io/badge/long-form-D4AF37?style=flat-square)
 </p>
 
----
+<blockquote align="center">
+  <em>Long-Form Narrative Consistency Engine</em>
+</blockquote>
 
-&nbsp;
+<div style="max-width:880px;margin:0 auto;padding:0 16px">
 
-## ✦ Story Engine
+## ✦ About
 
-A logic-consistent story-generation engine that helps long-form writers maintain narrative integrity — from the first chapter to the last.
+<p style="font-size:15px;line-height:1.8;color:#2C2C2C">STORY-ENGINE 是面向长篇故事的叙事一致性检查引擎，对角色设定、因果时序与记忆线索进行自动化审计，确保百万字级作品在人物、情节与世界观上始终保持连贯。它把编辑的直觉校验转化为可复用的结构化管线。</p>
 
-&nbsp;
+<p align="center">
+  <img src="assets/overview.svg" alt="STORY-ENGINE overview" style="width:100%">
+</p>
 
-## ✦ Consistency Pipeline
+</div>
 
-```mermaid
-flowchart LR
-    SEED(("Seed<br/>Prompt")):::input --> CH(("Chapter<br/>Outline")):::gen
-    CH --> CC(("Character<br/>Consistency")):::check
-    CH --> CL(("Causal<br/>Logic")):::check
-    CH --> EM(("Event<br/>Memory")):::check
-
-    CC --> |"pass"| OUT(("Coherent<br/>Output")):::output
-    CL --> |"pass"| OUT
-    EM --> |"pass"| OUT
-
-    CC --> |"fail"| FIX(("Flag &amp;<br/>Suggest")):::alert
-    CL --> |"fail"| FIX
-    EM --> |"fail"| FIX
-    FIX --> CH
-
-    classDef input fill:#FAFAFA,stroke:#D4AF37,stroke-width:2px,color:#2C2C2C
-    classDef gen fill:#F5F0E6,stroke:#C9A96E,stroke-width:1px,color:#2C2C2C
-    classDef check fill:#FAFAFA,stroke:#B8B8B8,stroke-width:1px,color:#2C2C2C
-    classDef output fill:#FAFAFA,stroke:#D4AF37,stroke-width:1px,color:#2C2C2C
-    classDef alert fill:#FAFAFA,stroke:#E0E0E0,stroke-width:0.5px,color:#8B8B8B
-```
-
-&nbsp;
-
-## ✦ Three Core Guarantees
-
-| Guarantee | Mechanism |
-|-----------|-----------|
-| **Character Consistency** | Personality vectors remain stable across chapters |
-| **Causal Logic** | Every plot point has a "because → therefore" chain |
-| **Event Memory** | All foreshadowing is tracked and echoed in later chapters |
-
-&nbsp;
+<p align="center">— ✦ —</p>
 
 ## ✦ Quick Start
 
 ```bash
-python story_engine.py --seed "A young woman discovers her best friend has been lying to her for years."
+git clone git@github.com:NOHN-AI/STORY-ENGINE.git
+cd STORY-ENGINE
+pip install -r requirements.txt
+python check.py --book ./manuscript
 ```
 
-The engine generates chapter-by-chapter outlines, checks causal logic, and outputs a self-consistent story. **No technical background needed** — the engine handles logic checks automatically.
-
-&nbsp;
-
-## ✦ Example
-
-**Input:**
-> *Elena, a detective, finds a torn photo in her missing partner's drawer.*
-
-**Output (excerpt):**
-> *Elena stares at the photo. It was taken two days before he vanished. Her hand shakes — not from fear, but from the realization that the person in the background is her own boss.*
-
-The engine ensures all subsequent chapters remember: the photo, the boss's role, Elena's emotional state, and every planted clue.
-
-&nbsp;
-
-## ✦ For Whom
-
-> Novelists · Screenwriters · Game Narrative Designers · Anyone writing long-form stories
-
-&nbsp;
-
----
+<p align="center">— ✦ —</p>
 
 <p align="center">
+  <a href="https://github.com/NOHN-AI">NOHN-AI</a>
+  &nbsp;·&nbsp;
+  <a href="https://www.nohnlins.com/">nohnlins.com</a>
+  &nbsp;·&nbsp;
   <a href="mailto:ai@nohnlins.com">ai@nohnlins.com</a>
 </p>
-<p align="center">
-  <sub>© 2026 Shanghai Linming Junhua &amp; NOHN AI Technology · All Rights Reserved</sub>
-</p>
+<p align="center"><sub>NOHN AI · STORY-ENGINE</sub></p>
