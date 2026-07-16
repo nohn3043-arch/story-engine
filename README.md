@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  ![nlp](https://img.shields.io/badge/nlp--D4AF37?style=flat-square)  ![consistency](https://img.shields.io/badge/consistency--D4AF37?style=flat-square)  ![long-form](https://img.shields.io/badge/long-form-D4AF37?style=flat-square)
+  <img src="https://img.shields.io/badge/nlp--D4AF37?style=flat-square" alt="nlp">  <img src="https://img.shields.io/badge/consistency--D4AF37?style=flat-square" alt="consistency">  <img src="https://img.shields.io/badge/long-form-D4AF37?style=flat-square" alt="long-form">
 </p>
 
 <blockquote align="center">
@@ -14,7 +14,7 @@
 
 ## ✦ About
 
-<p style="font-size:15px;line-height:1.8;color:#2C2C2C">STORY-ENGINE 是面向长篇故事的叙事一致性检查引擎，对角色设定、因果时序与记忆线索进行自动化审计，确保百万字级作品在人物、情节与世界观上始终保持连贯。它把编辑的直觉校验转化为可复用的结构化管线。</p>
+<p style="font-size:15px;line-height:1.8;color:#2C2C2C">STORY-ENGINE is a narrative consistency checking engine for long-form fiction, performing automated audits on character settings, causal timelines, and memory threads to ensure million-word works remain coherent across characters, plots, and worldbuilding. It transforms an editor's intuitive checks into a reusable, structured pipeline.</p>
 
 <p align="center">
   <img src="assets/overview.svg" alt="STORY-ENGINE overview" style="width:100%">
