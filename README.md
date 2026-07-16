@@ -1,75 +1,93 @@
-## A story has to make sense
+<p align="center">
+  <em>No plot holes. No character drift. Every thread is tied.</em>
+</p>
 
+<p align="center">
+  <img src="https://img.shields.io/badge/engine-causal_chain-D4AF37?style=flat-square" alt="causal">
+  <img src="https://img.shields.io/badge/python-3.9+-2C2C2C?style=flat-square" alt="python">
+  <img src="https://img.shields.io/badge/genre-agnostic-2C2C2C?style=flat-square" alt="genre">
+</p>
 
+---
 
-# Story Engine
+&nbsp;
 
-> A writing tool that keeps your story consistent from beginning to end – no more plot holes or characters acting out of character.
+## ✦ Story Engine
 
-## What does it do?
+A logic-consistent story-generation engine that helps long-form writers maintain narrative integrity — from the first chapter to the last.
 
-You give it a starting idea. It helps you write a full story where:
-- Characters stay true to themselves (no sudden personality changes).
-- The plot flows logically (no "wait, how did we get here?" moments).
-- Past events are remembered (foreshadowing doesn't get lost).
+&nbsp;
 
-## Who is it for?
+## ✦ Consistency Pipeline
 
-- Writers who struggle with long‑form consistency.
-- Screenwriters who need to track plot threads.
-- Game developers who build narrative‑driven worlds.
-- Anyone who wants to tell a story without breaking its own rules.
+```mermaid
+flowchart LR
+    SEED(("Seed<br/>Prompt")):::input --> CH(("Chapter<br/>Outline")):::gen
+    CH --> CC(("Character<br/>Consistency")):::check
+    CH --> CL(("Causal<br/>Logic")):::check
+    CH --> EM(("Event<br/>Memory")):::check
 
-## How to use it
+    CC --> |"pass"| OUT(("Coherent<br/>Output")):::output
+    CL --> |"pass"| OUT
+    EM --> |"pass"| OUT
 
-1. Clone the repository.
-2. Install a few dependencies (Python 3.9+).
-3. Run the engine with a simple text prompt:
+    CC --> |"fail"| FIX(("Flag &amp;<br/>Suggest")):::alert
+    CL --> |"fail"| FIX
+    EM --> |"fail"| FIX
+    FIX --> CH
 
+    classDef input fill:#FAFAFA,stroke:#D4AF37,stroke-width:2px,color:#2C2C2C
+    classDef gen fill:#F5F0E6,stroke:#C9A96E,stroke-width:1px,color:#2C2C2C
+    classDef check fill:#FAFAFA,stroke:#B8B8B8,stroke-width:1px,color:#2C2C2C
+    classDef output fill:#FAFAFA,stroke:#D4AF37,stroke-width:1px,color:#2C2C2C
+    classDef alert fill:#FAFAFA,stroke:#E0E0E0,stroke-width:0.5px,color:#8B8B8B
+```
 
+&nbsp;
 
-python story_engine.py --seed "A young woman discovers her best friend has been lying to her for years."
+## ✦ Three Core Guarantees
 
+| Guarantee | Mechanism |
+|-----------|-----------|
+| **Character Consistency** | Personality vectors remain stable across chapters |
+| **Causal Logic** | Every plot point has a "because → therefore" chain |
+| **Event Memory** | All foreshadowing is tracked and echoed in later chapters |
 
+&nbsp;
 
-4. The engine will generate a chapter‑by‑chapter outline, check every “because → so” step, and produce a story that holds together.
-
-> **No technical background required.** The engine does the logic checking for you – you just review and edit the output.
-
-## Example
-
-**Input:**  
-`Elena, a detective, finds a torn photo in her missing partner's drawer.`
-
-**Output (short excerpt):**  
-*“Elena stares at the photo. It was taken two days before he vanished. Her hand shakes – not from fear, but from the realisation that the person in the background is her own boss.”*
-
-The engine ensures that later chapters never forget the photo, the boss's role, or Elena's emotional state.
-
-## License & Authorization
-
-This repository is a technical showcase for **Story Engine**. Copyright © 2026 Shanghai Linming Junhua Technology Co., Ltd. and NOHN AI TECHNOLOGY PTE. LTD. All rights reserved.
-
-| User | Purpose | License Requirement |
-|---|---|---|
-| Individual (natural person) | Non-commercial academic research / study / personal experimentation | **Free** under the "Free Individual Research License" in [LICENSE](./LICENSE) |
-| Government agency / public institution / enterprise | Any purpose (incl. internal deployment, product development, service provision) | **Requires prior written paid authorization** |
-
-- **Individual researchers** may use the Work free of charge for non-commercial research under [LICENSE](./LICENSE), but not for any commercial purpose, nor to provide services to any enterprise or government organization.
-- **Government / enterprise users** may not copy, deploy, run, integrate, or distribute the Work before signing a Commercial Authorization Agreement and paying the agreed fee.
-- **Apply for authorization**:
-  - International / Global: [ai@nohnlins.com](mailto:ai@nohnlins.com)
-  - China: [ai@tx.nohnlins.com](mailto:ai@tx.nohnlins.com)
-
-The licensor, governing law, and dispute resolution are determined by the user's location as set out in [LICENSE](./LICENSE): users within the PRC → Shanghai Linming Junhua Technology Co., Ltd. (laws of the PRC); users outside the PRC → NOHN AI TECHNOLOGY PTE. LTD. (laws of Singapore, SIAC arbitration).
-
-## Get started
+## ✦ Quick Start
 
 ```bash
-git clone https://gitee.com/lin-mingjun-hua_0/story-engine.git
-cd story-engine
+python story_engine.py --seed "A young woman discovers her best friend has been lying to her for years."
 ```
 
-Happy writing – without the headaches. ✍️
+The engine generates chapter-by-chapter outlines, checks causal logic, and outputs a self-consistent story. **No technical background needed** — the engine handles logic checks automatically.
 
-```
+&nbsp;
+
+## ✦ Example
+
+**Input:**
+> *Elena, a detective, finds a torn photo in her missing partner's drawer.*
+
+**Output (excerpt):**
+> *Elena stares at the photo. It was taken two days before he vanished. Her hand shakes — not from fear, but from the realization that the person in the background is her own boss.*
+
+The engine ensures all subsequent chapters remember: the photo, the boss's role, Elena's emotional state, and every planted clue.
+
+&nbsp;
+
+## ✦ For Whom
+
+> Novelists · Screenwriters · Game Narrative Designers · Anyone writing long-form stories
+
+&nbsp;
+
+---
+
+<p align="center">
+  <a href="mailto:ai@nohnlins.com">ai@nohnlins.com</a>
+</p>
+<p align="center">
+  <sub>© 2026 Shanghai Linming Junhua &amp; NOHN AI Technology · All Rights Reserved</sub>
+</p>
