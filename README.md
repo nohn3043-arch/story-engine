@@ -141,7 +141,7 @@ This repository is a technical showcase for **Story Engine**. Copyright © 2026 
 - **Government / enterprise users** may not copy, deploy, run, integrate, or distribute the Work before signing a Commercial Authorization Agreement and paying the agreed fee.
 - **Apply for authorization**:
   - International / Global: [ai@nohnlins.com](mailto:ai@nohnlins.com)
-  - China: [ai@tx.nohnlins.com](mailto:ai@tx.nohnlins.com)
+  - China: [lin@secondai.top](mailto:lin@secondai.top)
 
 The licensor, governing law, and dispute resolution are determined by the user's location as set out in [LICENSE](./LICENSE): users within the PRC → Shanghai Linming Junhua Technology Co., Ltd. (laws of the PRC); users outside the PRC → NOHN AI TECHNOLOGY PTE. LTD. (laws of Singapore, SIAC arbitration).
 
