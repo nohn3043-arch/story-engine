@@ -28,6 +28,7 @@
 
 ```bash
 git clone https://github.com/NOHN-AI/Story-engine.git
+# Gitee mirror (enterprise): https://e.gitee.com/nohn-ecosystem/story-engine.git
 cd Story-engine
 # Pure Python ≥3.8. Engine files use spaces in their names by design.
 python "Story Engine for Creator.py"      # creator-facing cognitive audit engine
@@ -92,6 +93,19 @@ STORY-ENGINE/
 ## ✦ License & Authorization
 
 This repository is **not open-source**. It uses a dual-track model: free for individual non-commercial research, paid commercial authorization required for government / enterprise. See [LICENSE](./LICENSE).
+
+| User | Purpose | License Requirement |
+|------|---------|---------------------|
+| Individual (natural person) | Non-commercial academic research / study / personal experimentation | **Free** under the "Free Individual Research License" in [LICENSE](./LICENSE) |
+| Government agency / public institution / enterprise | Any purpose (incl. internal deployment, product development, service provision) | **Requires prior written paid authorization** |
+
+- **Individual researchers** may use the Work free of charge for non-commercial research under [LICENSE](./LICENSE), but not for any commercial purpose, nor to provide services to any enterprise or government organization.
+- **Government / enterprise users** may not copy, deploy, run, integrate, or distribute the Work before signing a Commercial Authorization Agreement and paying the agreed fee.
+- **Apply for authorization**:
+  - International / Global: [ai@nohnlins.com](mailto:ai@nohnlins.com)
+  - China: [lin@secondai.top](mailto:lin@secondai.top)
+
+The licensor, governing law, and dispute resolution are determined by the user's location as set out in [LICENSE](./LICENSE): users within the PRC → Shanghai Linming Junhua Technology Co., Ltd. (laws of the PRC); users outside the PRC → NOHN AI TECHNOLOGY PTE. LTD. (laws of Singapore, SIAC arbitration).
 
 <p align="center">
   <a href="https://github.com/NOHN-AI">NOHN-AI</a>
