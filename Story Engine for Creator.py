@@ -348,6 +348,8 @@ class UltimateCausalNovelEngine:
         self.state_extractor = AutomaticStateExtractor()
         self.repair_engine = AutomaticRepairEngine()
         self.report_generator = VisualReportGenerator()
+        self.sp_engine = SecondPerspectiveCausalEngine()
+        self.world_builder = WorldBuilder()
 
     def set_llm_provider(self, provider: LLMProvider) -> None:
         self.llm_provider = provider
@@ -371,19 +373,27 @@ class UltimateCausalNovelEngine:
         )
 
     def _register_all_audit_plugins(self):
-        self.planning_auditor.register_plugin(AuditPlugin("story_chain_integrity", lambda _: {"passed": True, "score": 100}))
+        self.planning_auditor.register_plugin(AuditPlugin("story_chain_integrity", self._audit_story_chain_integrity))
         self.planning_auditor.register_plugin(AuditPlugin("implicit_assumption_detection", self._audit_implicit_assumptions))
         self.node_auditor.register_plugin(AuditPlugin("logical_jump_detection", self._audit_logical_jump))
-        self.node_auditor.register_plugin(AuditPlugin("premise_conclusion_match", lambda _: {"passed": True, "score": 100}))
-        self.consistency_auditor.register_plugin(AuditPlugin("character_consistency", lambda _: {"passed": True, "score": 100}))
-        self.consistency_auditor.register_plugin(AuditPlugin("world_rule_consistency", lambda _: {"passed": True, "score": 100}))
+        self.node_auditor.register_plugin(AuditPlugin("premise_conclusion_match", self._audit_premise_conclusion_match))
+        self.consistency_auditor.register_plugin(AuditPlugin("character_consistency", self._audit_character_consistency))
+        self.consistency_auditor.register_plugin(AuditPlugin("world_rule_consistency", lambda ctx: self.world_builder.check_consistency(ctx, self.global_state)))
         self.vulnerability_auditor.register_plugin(AuditPlugin("vulnerability_assessment", self._audit_vulnerability))
 
     def _audit_implicit_assumptions(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        for line in context["causal_lines"]:
+        events = self._context_to_events(context)
+        chain = self.sp_engine.narrative_stripping(events)
+        self.sp_engine.implicit_assumption_probe(chain)
+        critical = 0
+        for line in context.get("causal_lines", []):
             for node in line.nodes:
                 node.implicit_assumptions = self.assumption_detector.detect(node, self.global_state)
-        return {"passed": True, "score": 100}
+        for ev in chain:
+            for a in ev.get("assumptions", []):
+                if a["collapse"] == "INEVITABLE":
+                    critical += 1
+        return {"passed": critical == 0, "score": max(0.0, 100.0 - critical * 20), "critical_assumptions": critical}
 
     def _audit_logical_jump(self, context: Dict[str, Any]) -> Dict[str, Any]:
         text = context.get("text", "")
@@ -397,6 +407,49 @@ class UltimateCausalNovelEngine:
         score = self.vulnerability_assessor.assess(node)
         node.vulnerability_score = score
         return {"passed": score >= 50, "score": score}
+
+    def _context_to_events(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        events: List[Dict[str, Any]] = []
+        lines = context.get("causal_lines") or []
+        for line in lines:
+            nodes = getattr(line, "nodes", line.get("nodes", []) if isinstance(line, dict) else [])
+            for n in nodes:
+                events.append({
+                    "id": getattr(n, "node_id", ""),
+                    "premise": getattr(n, "premise", ""),
+                    "conclusion": getattr(n, "conclusion", ""),
+                    "character": getattr(n, "character", ""),
+                })
+        if not events and context.get("node"):
+            n = context["node"]
+            events.append({"id": getattr(n, "node_id", ""), "premise": getattr(n, "premise", ""),
+                           "conclusion": getattr(n, "conclusion", ""), "character": getattr(n, "character", "")})
+        return events
+
+    def _audit_story_chain_integrity(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        chain = self.sp_engine.narrative_stripping(self._context_to_events(context))
+        dangling = [e["id"] for e in chain if e.get("dangling")]
+        return {"passed": not dangling, "score": max(0.0, 100.0 - len(dangling) * 15), "dangling_events": dangling}
+
+    def _audit_premise_conclusion_match(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        mismatches = []
+        for ev in self._context_to_events(context):
+            char = ev.get("character") or ""
+            if char and char not in (ev.get("premise", "") + ev.get("conclusion", "")):
+                mismatches.append(ev["id"])
+        return {"passed": not mismatches, "score": max(0.0, 100.0 - len(mismatches) * 15), "mismatch_events": mismatches}
+
+    def _audit_character_consistency(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        violations = []
+        for ev in self._context_to_events(context):
+            char = ev.get("character")
+            profile = self.global_state.characters.get(char, {})
+            if profile:
+                restraint = profile.get("restraint", profile.get("克制", 0.5))
+                if isinstance(restraint, (int, float)) and restraint > 0.7:
+                    if any(w in ev.get("conclusion", "") for w in ["大喊", "追赶", "崩溃", "痛哭"]):
+                        violations.append(ev["id"])
+        return {"passed": not violations, "score": max(0.0, 100.0 - len(violations) * 20), "violations": violations}
 
     def plan_chapter(self, chapter_id: int, title: str, causal_lines: List[CausalLine]) -> Optional[Chapter]:
         # 自动注册角色
@@ -449,7 +502,20 @@ class UltimateCausalNovelEngine:
             {"chapter": asdict(chapter), "text": full_content, "global_state": asdict(self.global_state)}
         )
         chapter.content = full_content.strip()
-        chapter.audit_report = consistency_audit
+        # 第二视角五步内核诊断（嵌入一致性审计结果）
+        sp_chain = self.sp_engine.narrative_stripping(
+            [{"id": n.node_id, "premise": n.premise, "conclusion": n.conclusion, "character": n.character}
+             for line in chapter.causal_lines for n in line.nodes]
+        )
+        self.sp_engine.implicit_assumption_probe(sp_chain)
+        sp_hedge = self.sp_engine.vulnerability_hedge(sp_chain)
+        sp_anchor = self.sp_engine.responsibility_anchor(sp_chain)
+        sp_recon = self.sp_engine.causal_reconstruction(sp_chain, fix_vars=[], target_state="叙事逻辑自洽")
+        chapter.audit_report = {**consistency_audit, "second_perspective": {
+            "collapse_verdict": sp_hedge["collapse_verdict"],
+            "anchors": sp_anchor,
+            "reconstruction": sp_recon,
+        }}
         changes = self.state_extractor.extract(full_content, self.global_state)
         for key, val in changes.items():
             self._apply_state_change(key, val)
@@ -582,6 +648,180 @@ Avoid abrupt words like "suddenly", "out of nowhere". Do NOT repeat previous con
         # 将所有节点放入一个 CausalLine（角色可以混合，但建议按角色分组，这里简化）
         line = CausalLine(line_id=f"ch{chapter_id}", character=nodes[0].character if nodes else "主角", nodes=nodes)
         return self.plan_chapter(chapter_id, title, [line])
+
+    def conceive_world(self, outline: str) -> Dict[str, Any]:
+        """构思世界观：从自然语言提纲生成势力/地理/法则/时间线骨架，并写入全局 world_rules。"""
+        self.world_builder.generate_skeleton(outline)
+        self.global_state.world_rules.update(self.world_builder.world_rules)
+        return self.world_builder.world_rules
+
+# =============================================================================
+# 第二视角因果推理引擎 V2.1（决定论内核，无概率化推测）
+# 五步算子：叙事剥离 → 内隐假设透视 → 脆弱性对冲 → 责任闭环锚定 → 因果重构
+# 与 business 引擎内联同一份内核，确保两引擎逻辑口径一致。
+# =============================================================================
+class SecondPerspectiveCausalEngine:
+    """决定论因果推理：仅做因果链的结构性判定，不输出概率估计。"""
+
+    _COLOCATION_HINTS = ["车站", "站台", "电车", "街道", "房间", "同处", "见面", "相遇", "战场", "广场"]
+    _MOTION_HINTS = ["追", "跑", "走", "离开", "去", "赶到", "赶来", "冲", "奔"]
+    _COMMS_HINTS = ["发消息", "打电话", "拉黑", "联系", "回复", "微信", "短信", "传讯"]
+    _JUMP_HINTS = ["突然", "莫名", "毫无理由", "不知怎么", "鬼使神差", "突然之间"]
+
+    def narrative_stripping(self, events):
+        chain = []
+        seen_chars = set()
+        for i, ev in enumerate(events):
+            ev = dict(ev)
+            ev.setdefault("id", f"E{i:03d}")
+            ev.setdefault("character", "")
+            premise, conclusion = ev.get("premise", ""), ev.get("conclusion", "")
+            char = ev["character"] or self._infer_character(premise + conclusion)
+            ev["character"] = char
+            dangling = bool(char) and (i > 0) and (char not in premise) and (char not in seen_chars)
+            if char:
+                seen_chars.add(char)
+            ev["dangling"] = dangling
+            chain.append(ev)
+        return chain
+
+    def implicit_assumption_probe(self, chain):
+        for ev in chain:
+            text = ev.get("premise", "") + ev.get("conclusion", "")
+            assumptions = []
+            if any(h in text for h in self._COLOCATION_HINTS):
+                assumptions.append({
+                    "content": "角色共处同一物理时空，场景自洽",
+                    "reverse_check": "撤除：角色不在同一时空 → 位移类行为失去前提",
+                    "collapse": "INEVITABLE" if any(m in ev.get("conclusion", "") for m in self._MOTION_HINTS) else "STABLE",
+                })
+            if any(h in text for h in self._COMMS_HINTS):
+                assumptions.append({
+                    "content": "角色间存在生效的通讯连接手段",
+                    "reverse_check": "撤除：无通讯手段 → 通讯类行为不成立",
+                    "collapse": "INEVITABLE" if any(h in ev.get("conclusion", "") for h in self._COMMS_HINTS) else "STABLE",
+                })
+            ev["assumptions"] = assumptions
+        return chain
+
+    def vulnerability_hedge(self, chain):
+        weakest, weakest_score = None, -1.0
+        for ev in chain:
+            frag = sum(1 for a in ev.get("assumptions", []) if a["collapse"] == "INEVITABLE")
+            if ev.get("dangling"):
+                frag += 2
+            ev["fragility"] = frag
+            if frag > weakest_score:
+                weakest_score, weakest = frag, ev
+        if weakest is None:
+            verdict = "STABLE"
+        elif weakest_score >= 2:
+            verdict = "INEVITABLE_COLLAPSE"
+        elif weakest_score == 1:
+            verdict = "CONDITIONAL_COLLAPSE"
+        else:
+            verdict = "STABLE"
+        return {
+            "weakest_variable": weakest["id"] if weakest else None,
+            "weakest_event": weakest,
+            "collapse_verdict": verdict,
+            "chain_fragility": [{"id": e["id"], "fragility": e.get("fragility", 0)} for e in chain],
+        }
+
+    def responsibility_anchor(self, chain):
+        anchors = []
+        for idx, ev in enumerate(chain):
+            char = ev.get("character", "")
+            action = self._extract_action(ev.get("conclusion", ""))
+            anchors.append({
+                "event_id": ev["id"],
+                "position": idx,
+                "accountable": char,
+                "decision_unit": f"{char}→{action}" if char else action,
+                "premise": ev.get("premise", ""),
+                "conclusion": ev.get("conclusion", ""),
+            })
+        return anchors
+
+    def causal_reconstruction(self, chain, fix_vars, target_state):
+        fixed_ids = set()
+        for ev in chain:
+            for fix in (fix_vars or []):
+                if ev["id"] == fix.get("target_id") or fix.get("apply_to") == "all":
+                    ev["premise"] = (ev["premise"] + "；" + fix.get("adds_premise", "")).strip("；")
+                    ev["dangling"] = False
+                    fixed_ids.add(ev["id"])
+        residual = []
+        for ev in chain:
+            if ev.get("dangling") and ev["id"] not in fixed_ids:
+                residual.append(f"事件{ev['id']}结论缺前提支撑")
+            for a in ev.get("assumptions", []):
+                if a["collapse"] == "INEVITABLE" and not fix_vars:
+                    residual.append(f"事件{ev['id']}关键预设不可逆撤除")
+        if residual:
+            return {"converged": False, "diagnosis": "[中断：因果链未收敛] " + "；".join(residual), "fixed_ids": list(fixed_ids)}
+        return {"converged": True, "target_state": target_state,
+                "diagnosis": f"因果链收敛至目标稳态：{target_state}", "fixed_ids": list(fixed_ids)}
+
+    def _infer_character(self, text):
+        return ""
+    def _extract_action(self, conclusion):
+        for w in self._MOTION_HINTS + self._COMMS_HINTS:
+            if w in conclusion:
+                return w
+        return conclusion[:12]
+
+
+# =============================================================================
+# WorldBuilder：世界观构思（势力 / 地理 / 法则 / 时间线骨架 + 一致性校验）
+# =============================================================================
+class WorldBuilder:
+    """从自然语言提纲构思世界观骨架，并维护 world_rules，供 world_rule_consistency 真实校验。"""
+
+    def __init__(self):
+        self.factions: List[str] = []
+        self.geography: List[str] = []
+        self.laws: List[str] = []
+        self.timeline: List[str] = []
+        self.world_rules: Dict[str, Any] = {}
+
+    def generate_skeleton(self, outline: str) -> Dict[str, Any]:
+        import re as _re
+        text = outline or ""
+        fac = _re.findall(r"([一-龥]{1,6}?(?:族|国|门|宗|组织|帝国|联邦|公会|势力))", text)
+        self.factions = list(dict.fromkeys(fac))
+        geo = _re.findall(r"([一-龥]{1,6}?(?:界|域|大陆|城|山|海|渊|境|洲|星球))", text)
+        self.geography = list(dict.fromkeys(geo))
+        law = _re.findall(r"([一-龥]{1,8}?(?:之道|法则|铁则|律令|天条))", text)
+        self.laws = list(dict.fromkeys(law))
+        self.world_rules = {
+            "factions": self.factions,
+            "geography": self.geography,
+            "laws": self.laws,
+            "timeline": self.timeline,
+        }
+        return self.world_rules
+
+    def add_timeline_event(self, event: str) -> None:
+        self.timeline.append(event)
+
+    def check_consistency(self, context: Dict[str, Any], global_state=None) -> Dict[str, Any]:
+        text = ""
+        if isinstance(context, dict):
+            text = context.get("text", "") or ""
+            ch = context.get("chapter")
+            if isinstance(ch, dict):
+                text = text or str(ch.get("content", ""))
+        if not self.factions and not self.geography and not self.laws:
+            return {"passed": True, "score": 100, "note": "世界观骨架未构建，跳过硬性校验"}
+        violations = []
+        for fac in self.factions:
+            if fac in text and ("灭亡" in text or "覆灭" in text) and (fac + "仍" in text):
+                violations.append(f"势力一致性冲突：{fac} 既被宣称覆灭又仍存续")
+        score = max(0.0, 100.0 - len(violations) * 20)
+        return {"passed": len(violations) == 0, "score": score,
+                "violations": violations, "world_rules": self.world_rules}
+
 
 # ==================== 演示示例 ====================
 if __name__ == "__main__":

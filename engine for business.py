@@ -30,6 +30,7 @@ class SPLStage(Enum):
     SCAN_ASSUMPTION = auto()   # 2. 内隐假设：校验人物动机、情节逻辑合理性
     HEDGE_RISK = auto()        # 3. 脆弱性对冲：识别OOC、逻辑漏洞、节奏问题
     LOCK_RESPONSIBILITY = auto()# 4. 责任闭环：输出故事质量评分、可追溯优化
+    RECONSTRUCT = auto()       # 5. 因果重构（第二视角五步因果推理内核）
 
 class RiskLevel(Enum):
     SAFE = auto()
@@ -471,10 +472,11 @@ class NarrativeStripper:
 # 校验人物动机合理性、情节逻辑连贯性、伏笔有效性
 # =============================================================================
 class ImplicitAssumptionScanner:
-    def __init__(self, account: ResponsibilityAccount, world_rules: Dict[str, Any]):
+    def __init__(self, account: ResponsibilityAccount, world_rules: Dict[str, Any], sp_engine: Optional["SecondPerspectiveCausalEngine"] = None):
         self.account = account
         self.stage = SPLStage.SCAN_ASSUMPTION
         self.world_rules = world_rules
+        self.sp_engine = sp_engine
         self.trace_logs: List[TraceLog] = []
 
     def _add_log(self, node_id: str, remark: str):
@@ -552,6 +554,21 @@ class ImplicitAssumptionScanner:
                     )
                     node.implicit_assumptions.append(ass)
 
+            # 第二视角五步内核·第二步：内隐假设透视（逆反校验 + 崩溃评估）
+            if self.sp_engine is not None:
+                ev = [{"id": node.node_id, "premise": node.premise, "conclusion": node.conclusion, "character": node.character}]
+                chain = self.sp_engine.narrative_stripping(ev)
+                self.sp_engine.implicit_assumption_probe(chain)
+                for a in chain[0].get("assumptions", []):
+                    if a["collapse"] == "INEVITABLE":
+                        node.implicit_assumptions.append(ImplicitAssumption(
+                            content=f"第二视角逆反校验：{a['content']}（撤除则{a['reverse_check']}）",
+                            confidence=0.85,
+                            risk_level=RiskLevel.CRITICAL,
+                            source_node_id=node.node_id,
+                            story_logic_check="第二视角因果重构：关键预设不可逆撤除"
+                        ))
+
             node.status = NodeStatus.AUDITED
             self._add_log(node.node_id, f"完成逻辑校验，发现{len(node.implicit_assumptions)}条内隐假设")
         return nodes
@@ -561,10 +578,11 @@ class ImplicitAssumptionScanner:
 # 识别OOC风险、逻辑漏洞、节奏问题、伏笔遗忘
 # =============================================================================
 class VulnerabilityHedge:
-    def __init__(self, account: ResponsibilityAccount, global_state: GlobalCausalState):
+    def __init__(self, account: ResponsibilityAccount, global_state: GlobalCausalState, sp_engine: Optional["SecondPerspectiveCausalEngine"] = None):
         self.account = account
         self.stage = SPLStage.HEDGE_RISK
         self.global_state = global_state
+        self.sp_engine = sp_engine
         self.trace_logs: List[TraceLog] = []
         self.risk_threshold = {"warning": 8, "critical": 4, "fatal": 1}
 
@@ -617,6 +635,18 @@ class VulnerabilityHedge:
             global_fuse = True
             self.global_state.global_risk_pool["OVER_RISK"] = RiskLevel.FATAL
             self._add_log("GLOBAL", f"全局风险超标，临界风险总数：{total_critical}")
+
+        # 第二视角五步内核·第三步：脆弱性对冲（崩塌必然判定，非概率）
+        if self.sp_engine is not None:
+            events = [{"id": n.node_id, "premise": n.premise, "conclusion": n.conclusion, "character": n.character} for n in nodes]
+            hedge_report = self.sp_engine.vulnerability_hedge(self.sp_engine.narrative_stripping(events))
+            verdict = hedge_report["collapse_verdict"]
+            if verdict == "INEVITABLE_COLLAPSE":
+                self._add_log("GLOBAL", f"第二视角崩塌必然判定：{hedge_report['weakest_variable']} 缺失将导致因果链必然崩塌")
+                global_fuse = True
+                self.global_state.global_risk_pool["SP_COLLAPSE"] = RiskLevel.FATAL
+            elif verdict == "CONDITIONAL_COLLAPSE":
+                self._add_log("GLOBAL", f"第二视角崩塌条件判定：{hedge_report['weakest_variable']} 缺失将条件性崩塌")
 
         return filtered_nodes, global_fuse
 
@@ -800,9 +830,10 @@ class SPLStoryGenerationEngine:
             stage=SPLStage.LOCK_RESPONSIBILITY.name
         )
 
+        self.sp_engine = SecondPerspectiveCausalEngine()
         self.stripper = NarrativeStripper(self.main_account)
-        self.scanner = ImplicitAssumptionScanner(self.main_account, self.state.world_rules)
-        self.hedger = VulnerabilityHedge(self.main_account, self.state)
+        self.scanner = ImplicitAssumptionScanner(self.main_account, self.state.world_rules, self.sp_engine)
+        self.hedger = VulnerabilityHedge(self.main_account, self.state, self.sp_engine)
         self.broker = CausalIntersectionBroker()
         self.auditor = CognitiveAuditEngine(self.main_account, [s.name for s in SPLStage])
         self.scribe = StylisticScribe()
@@ -894,13 +925,30 @@ class SPLStoryGenerationEngine:
                 if delta_report:
                     print(f"   [{i}/{len(valid_nodes)}] {node.character} 张力：{tension:.2f} | 情感变化：{delta_report}")
 
-            # 【SPL 4 责任闭环：故事质量评分】
+            # 【SPL 4 责任闭环：故事质量评分 + 第二视角责任锚定】
             quality_audit = self.auditor.audit_story_quality(chapter_graph, valid_nodes)
             chapter_graph.actual_tension = sum(tension_curve)/len(tension_curve) if tension_curve else 0
+            sp_events = [{"id": n.node_id, "premise": n.premise, "conclusion": n.conclusion, "character": n.character} for n in valid_nodes]
+            sp_chain = self.sp_engine.narrative_stripping(sp_events)
+            sp_anchors = self.sp_engine.responsibility_anchor(sp_chain)
             chapter_graph.audit_report = {
                 "emotion_audit": rule_audit,
-                "quality_audit": quality_audit
+                "quality_audit": quality_audit,
+                "responsibility_anchors": sp_anchors
             }
+
+            # 【SPL 5 因果重构：第二视角五步内核第五步】
+            print("5/5 执行：第二视角因果重构（收敛校验至目标稳态）")
+            self.sp_engine.implicit_assumption_probe(sp_chain)
+            sp_hedge = self.sp_engine.vulnerability_hedge(sp_chain)
+            sp_recon = self.sp_engine.causal_reconstruction(sp_chain, fix_vars=[], target_state="逻辑自洽稳态")
+            chapter_graph.audit_report["second_perspective"] = {
+                "collapse_verdict": sp_hedge["collapse_verdict"],
+                "weakest_variable": sp_hedge["weakest_variable"],
+                "reconstruction": sp_recon,
+            }
+            if not sp_recon["converged"]:
+                print(f"   ⚠️ 第二视角诊断：{sp_recon['diagnosis']}")
             self.state.global_tension_curve.extend(tension_curve)
 
             chapter_graph.content = "\n\n".join(content_blocks)
@@ -933,6 +981,131 @@ class SPLStoryGenerationEngine:
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2, default=_json_default)
+
+# =============================================================================
+# 第二视角因果推理引擎 V2.1（决定论内核，无概率化推测）
+# 五步算子：叙事剥离 → 内隐假设透视 → 脆弱性对冲 → 责任闭环锚定 → 因果重构
+# 统一供 business / creator 两引擎内联复用（不依赖具体 dataclass 字段）。
+# =============================================================================
+class SecondPerspectiveCausalEngine:
+    """决定论因果推理：仅做因果链的结构性判定，不输出概率估计。"""
+
+    _COLOCATION_HINTS = ["车站", "站台", "电车", "街道", "房间", "同处", "见面", "相遇", "战场", "广场"]
+    _MOTION_HINTS = ["追", "跑", "走", "离开", "去", "赶到", "赶来", "冲", "奔"]
+    _COMMS_HINTS = ["发消息", "打电话", "拉黑", "联系", "回复", "微信", "短信", "传讯"]
+    _JUMP_HINTS = ["突然", "莫名", "毫无理由", "不知怎么", "鬼使神差", "突然之间"]
+
+    # —— 第一步：叙事剥离 ——
+    def narrative_stripping(self, events):
+        """输入 events: List[Dict{premise,conclusion,character,id}]。
+        输出纯因果事件链，并标记悬空结论（结论主体未在前提交代）。"""
+        chain = []
+        seen_chars = set()
+        for i, ev in enumerate(events):
+            ev = dict(ev)
+            ev.setdefault("id", f"E{i:03d}")
+            ev.setdefault("character", "")
+            premise, conclusion = ev.get("premise", ""), ev.get("conclusion", "")
+            char = ev["character"] or self._infer_character(premise + conclusion)
+            ev["character"] = char
+            dangling = bool(char) and (i > 0) and (char not in premise) and (char not in seen_chars)
+            if char:
+                seen_chars.add(char)
+            ev["dangling"] = dangling
+            chain.append(ev)
+        return chain
+
+    # —— 第二步：内隐假设透视（逆反校验 + 崩溃评估）——
+    def implicit_assumption_probe(self, chain):
+        for ev in chain:
+            text = ev.get("premise", "") + ev.get("conclusion", "")
+            assumptions = []
+            if any(h in text for h in self._COLOCATION_HINTS):
+                assumptions.append({
+                    "content": "角色共处同一物理时空，场景自洽",
+                    "reverse_check": "撤除：角色不在同一时空 → 位移类行为失去前提",
+                    "collapse": "INEVITABLE" if any(m in ev.get("conclusion", "") for m in self._MOTION_HINTS) else "STABLE",
+                })
+            if any(h in text for h in self._COMMS_HINTS):
+                assumptions.append({
+                    "content": "角色间存在生效的通讯连接手段",
+                    "reverse_check": "撤除：无通讯手段 → 通讯类行为不成立",
+                    "collapse": "INEVITABLE" if any(h in ev.get("conclusion", "") for h in self._COMMS_HINTS) else "STABLE",
+                })
+            ev["assumptions"] = assumptions
+        return chain
+
+    # —— 第三步：脆弱性对冲（崩塌必然判定，三档非概率）——
+    def vulnerability_hedge(self, chain):
+        weakest, weakest_score = None, -1.0
+        for ev in chain:
+            frag = sum(1 for a in ev.get("assumptions", []) if a["collapse"] == "INEVITABLE")
+            if ev.get("dangling"):
+                frag += 2
+            ev["fragility"] = frag
+            if frag > weakest_score:
+                weakest_score, weakest = frag, ev
+        if weakest is None:
+            verdict = "STABLE"
+        elif weakest_score >= 2:
+            verdict = "INEVITABLE_COLLAPSE"
+        elif weakest_score == 1:
+            verdict = "CONDITIONAL_COLLAPSE"
+        else:
+            verdict = "STABLE"
+        return {
+            "weakest_variable": weakest["id"] if weakest else None,
+            "weakest_event": weakest,
+            "collapse_verdict": verdict,
+            "chain_fragility": [{"id": e["id"], "fragility": e.get("fragility", 0)} for e in chain],
+        }
+
+    # —— 第四步：责任闭环锚定（最小决策单元 / 责任节点）——
+    def responsibility_anchor(self, chain):
+        anchors = []
+        for idx, ev in enumerate(chain):
+            char = ev.get("character", "")
+            action = self._extract_action(ev.get("conclusion", ""))
+            anchors.append({
+                "event_id": ev["id"],
+                "position": idx,
+                "accountable": char,
+                "decision_unit": f"{char}→{action}" if char else action,
+                "premise": ev.get("premise", ""),
+                "conclusion": ev.get("conclusion", ""),
+            })
+        return anchors
+
+    # —— 第五步：因果重构（注入修正变量，校验收敛至目标稳态）——
+    def causal_reconstruction(self, chain, fix_vars, target_state):
+        fixed_ids = set()
+        for ev in chain:
+            for fix in (fix_vars or []):
+                if ev["id"] == fix.get("target_id") or fix.get("apply_to") == "all":
+                    ev["premise"] = (ev["premise"] + "；" + fix.get("adds_premise", "")).strip("；")
+                    ev["dangling"] = False
+                    fixed_ids.add(ev["id"])
+        residual = []
+        for ev in chain:
+            if ev.get("dangling") and ev["id"] not in fixed_ids:
+                residual.append(f"事件{ev['id']}结论缺前提支撑")
+            for a in ev.get("assumptions", []):
+                if a["collapse"] == "INEVITABLE" and not fix_vars:
+                    residual.append(f"事件{ev['id']}关键预设不可逆撤除")
+        if residual:
+            return {"converged": False, "diagnosis": "[中断：因果链未收敛] " + "；".join(residual), "fixed_ids": list(fixed_ids)}
+        return {"converged": True, "target_state": target_state,
+                "diagnosis": f"因果链收敛至目标稳态：{target_state}", "fixed_ids": list(fixed_ids)}
+
+    # —— 内部工具 ——
+    def _infer_character(self, text):
+        return ""
+    def _extract_action(self, conclusion):
+        for w in self._MOTION_HINTS + self._COMMS_HINTS:
+            if w in conclusion:
+                return w
+        return conclusion[:12]
+
 
 # =============================================================================
 # 禁忌恋题材演示：宋玖凝/宋明乘

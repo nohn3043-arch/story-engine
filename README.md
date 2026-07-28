@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="STORY-ENGINE banner" style="width:100%">
+  <img src="https://sourceforge.net/p/story-engine/git/ci/main/tree/assets/banner.png?format=raw" alt="STORY-ENGINE banner" style="width:100%">
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
 <p style="font-size:15px;line-height:1.8;color:#2C2C2C">STORY-ENGINE is a narrative consistency checking engine for long-form fiction, performing automated audits on character settings, causal timelines, and memory threads to ensure million-word works remain coherent across characters, plots, and worldbuilding. It transforms an editor's intuitive checks into a reusable, structured pipeline.</p>
 
 <p align="center">
-  <img src="assets/overview.svg" alt="STORY-ENGINE overview" style="width:100%">
+  <img src="https://sourceforge.net/p/story-engine/git/ci/main/tree/assets/overview.png?format=raw" alt="STORY-ENGINE overview" style="width:100%">
 </p>
 
 </div>
@@ -27,8 +27,8 @@
 ## ✦ Quick Start
 
 ```bash
-git clone git@github.com:NOHN-AI/STORY-ENGINE.git
-cd STORY-ENGINE
+git clone https://github.com/NOHN-AI/Story-engine.git
+cd Story-engine
 # Pure Python ≥3.8. Engine files use spaces in their names by design.
 python "Story Engine for Creator.py"      # creator-facing cognitive audit engine
 # or: python "engine for business.py"     # SPL four-stage editorial pipeline
@@ -85,7 +85,7 @@ python "engine for business.py"
 STORY-ENGINE/
 ├── Story Engine for Creator.py    # creator-facing cognitive audit engine
 ├── engine for business.py         # SPL four-stage editorial reasoning pipeline
-├── assets/                        # banner.svg, overview.svg
+├── assets/                        # banner.png, overview.png
 └── LICENSE
 ```
 
