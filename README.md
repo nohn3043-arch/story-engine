@@ -1,117 +1,64 @@
-<p align="center">
-  <img src="https://sourceforge.net/p/story-engine/git/ci/main/tree/assets/banner.png?format=raw" alt="STORY-ENGINE banner" style="width:100%">
-</p>
+# Story Engine（故事引擎）
 
 <p align="center">
-  <img src="https://img.shields.io/badge/nlp--D4AF37?style=flat-square" alt="nlp">  <img src="https://img.shields.io/badge/consistency--D4AF37?style=flat-square" alt="consistency">  <img src="https://img.shields.io/badge/long-form-D4AF37?style=flat-square" alt="long-form">
+  <img src="https://img.shields.io/badge/story--engine-D4AF37?style=flat-square" alt="story-engine">  <img src="https://img.shields.io/badge/spl--pipeline-D4AF37?style=flat-square" alt="spl-pipeline">  <img src="https://img.shields.io/badge/multi--causal-D4AF37?style=flat-square" alt="multi-causal">
 </p>
 
-<blockquote align="center">
-  <em>Long-Form Narrative Consistency Engine</em>
-</blockquote>
+基于 **SPL（故事/系统处理语言）** 的故事生成与推演引擎。以四阶段确定性流水线驱动，融合多因果网络，产出结构一致、因果可追溯的叙事。
 
-<div style="max-width:880px;margin:0 auto;padding:0 16px">
+---
 
-## ✦ About
+## ✨ 特性
 
-<p style="font-size:15px;line-height:1.8;color:#2C2C2C">STORY-ENGINE is a narrative consistency checking engine for long-form fiction, performing automated audits on character settings, causal timelines, and memory threads to ensure million-word works remain coherent across characters, plots, and worldbuilding. It transforms an editor's intuitive checks into a reusable, structured pipeline.</p>
+- **SPL 四阶段流水线**：叙事解构 → 因果建模 → 分支推演 → 渲染输出。
+- **多因果网络**：支持多条并行因果链与交汇，保证情节闭合而非随机发散。
+- **引擎与创作器分离**：`engine for business.py` 提供可嵌入的业务接口；`Story Engine for Creator.py` 面向创作者的编排工具。
+- **确定性输出**：相同输入产生一致结果，便于审计与复现。
+- **可集成 LLM**：默认内置 Mock 推理，可替换为真实大模型提供方。
 
-<p align="center">
-  <img src="https://sourceforge.net/p/story-engine/git/ci/main/tree/assets/overview.png?format=raw" alt="STORY-ENGINE overview" style="width:100%">
-</p>
+## 📦 模块
 
-</div>
+| 文件 | 用途 |
+|------|------|
+| `engine for business.py` | 业务侧引擎：状态机、角色推断、章节渲染、可嵌入接口 |
+| `Story Engine for Creator.py` | 创作者侧：自动状态抽取、章节编译、整书渲染 |
+| `compile_all.py` / `render_chapter` | 章节级与整书级渲染入口 |
 
-<p align="center">— ✦ —</p>
-
-## ✦ Quick Start
+## 🚀 快速开始
 
 ```bash
-git clone https://github.com/NOHN-AI/Story-engine.git
-# Gitee mirror (enterprise): https://e.gitee.com/nohn-ecosystem/story-engine.git
-cd Story-engine
-# Pure Python ≥3.8. Engine files use spaces in their names by design.
-python "Story Engine for Creator.py"      # creator-facing cognitive audit engine
-# or: python "engine for business.py"     # SPL four-stage editorial pipeline
-```
+# 依赖
+pip install -r requirements.txt   # 或仅标准库即可运行演示
 
-<p align="center">— ✦ —</p>
-
-## ✦ What It Does
-
-<div style="max-width:880px;margin:0 auto;padding:0 16px">
-
-STORY-ENGINE audits long-form fiction for narrative consistency, turning an editor's intuition into a reusable, structured pipeline. It works in two layers:
-
-- **Creator engine** (`Story Engine for Creator.py`) — a cognitive-audit layer for storytelling:
-  - `ResponsibilityAccount` — every check is anchored to a named accountable node (who / role / stage).
-  - `CognitiveAuditEngine` + pluggable `AuditPlugin`s — composable audit dimensions.
-  - `CausalNode` with implicit assumptions and a `vulnerability_score` — traces *because → so* logic and grades fragility.
-- **Business engine** (`engine for business.py`) — the SPL four-stage native reasoning pipeline:
-  1. `STRIP_NARRATIVE` — identify story elements (foreshadow / turn / climax / setup).
-  2. `SCAN_ASSUMPTION` — verify character motive & plot-logic soundness.
-  3. `HEDGE_RISK` — flag OOC, logic holes, pacing problems.
-  4. `LOCK_RESPONSIBILITY` — emit a quality score with traceable optimizations.
-  - Risk levels: `SAFE` / `WARNING` / `CRITICAL` / `FATAL`; node states: `RAW` / `STRIPPED` / `AUDITED` / `PRUNED` / `ACTIVE`.
-
-</div>
-
-## ✦ Usage
-
-<div style="max-width:880px;margin:0 auto;padding:0 16px">
-
-```python
-import importlib.util
-
-def load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
-
-biz = load("biz", "engine for business.py")
-print([s.name for s in biz.SPLStage])   # STRIP_NARRATIVE … LOCK_RESPONSIBILITY
-```
-
-Or run the bundled engines directly:
-
-```bash
-python "Story Engine for Creator.py"
+# 运行演示
 python "engine for business.py"
+python "Story Engine for Creator.py"
 ```
 
-</div>
+## 🧩 工作原理（简述）
 
-## ✦ Project Structure
+1. **叙事解构**：将大纲拆分为场景、角色、目标等结构化单元。
+2. **因果建模**：为每个单元建立因果前驱/后继，构成多因果网络。
+3. **分支推演**：在决策点按声明规则展开分支，检测悬空与死锁。
+4. **渲染输出**：将选定路径渲染为连贯文本，保留因果标注。
 
-```
-STORY-ENGINE/
-├── Story Engine for Creator.py    # creator-facing cognitive audit engine
-├── engine for business.py         # SPL four-stage editorial reasoning pipeline
-├── assets/                        # banner.png, overview.png
-└── LICENSE
-```
+## 🔗 相关
 
-## ✦ License & Authorization
+- 因果审计内核：第二视角决策引擎（second-perspective / nomos）
+- 拟人化智能体引擎：Anthropomorphic-Agent-Engine
+- 在线体验：https://nohnlins.com/
 
-This repository is **not open-source**. It uses a dual-track model: free for individual non-commercial research, paid commercial authorization required for government / enterprise. See [LICENSE](./LICENSE).
+## 📜 许可与授权
 
-| User | Purpose | License Requirement |
-|------|---------|---------------------|
-| Individual (natural person) | Non-commercial academic research / study / personal experimentation | **Free** under the "Free Individual Research License" in [LICENSE](./LICENSE) |
-| Government agency / public institution / enterprise | Any purpose (incl. internal deployment, product development, service provision) | **Requires prior written paid authorization** |
+本仓库**非开源**。采用双轨模式：个人非商业研究免费；政府 / 企业需事先取得书面商业授权。详见 [LICENSE](./LICENSE)。
 
-- **Individual researchers** may use the Work free of charge for non-commercial research under [LICENSE](./LICENSE), but not for any commercial purpose, nor to provide services to any enterprise or government organization.
-- **Government / enterprise users** may not copy, deploy, run, integrate, or distribute the Work before signing a Commercial Authorization Agreement and paying the agreed fee.
-- **Apply for authorization**:
-  - International / Global: [ai@nohnlins.com](mailto:ai@nohnlins.com)
-  - China: [lin@secondai.top](mailto:lin@secondai.top)
-
-The licensor, governing law, and dispute resolution are determined by the user's location as set out in [LICENSE](./LICENSE): users within the PRC → Shanghai Linming Junhua Technology Co., Ltd. (laws of the PRC); users outside the PRC → NOHN AI TECHNOLOGY PTE. LTD. (laws of Singapore, SIAC arbitration).
+---
 
 <p align="center">
   <a href="https://github.com/NOHN-AI">NOHN-AI</a>
   &nbsp;·&nbsp;
   <a href="https://www.nohnlins.com/">nohnlins.com</a>
   &nbsp;·&nbsp;
-  <a href="mailto:ai@nohnlins.com">ai@nohnlins.com</a>
+  <a href="mailto:lin@secondai.top">lin@secondai.top</a>
 </p>
-<p align="center"><sub>NOHN AI · STORY-ENGINE</sub></p>
+<p align="center"><sub>NOHN AI · Story Engine</sub></p>
