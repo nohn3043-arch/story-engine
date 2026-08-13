@@ -170,8 +170,8 @@ class AutomaticStateExtractor:
     def extract(text: str, current_state: GlobalState) -> Dict[str, Any]:
         changes: Dict[str, Any] = {}
         if "拉黑了" in text or "拉黑" in text:
-            changes.setdefault("characters", {})
-            changes["characters.叶婉清.relationship.陆景川"] = "blocked"
+            changes.setdefault("events", [])
+            changes["events"] = current_state.events + [{"event": "关系阻断", "desc": "检测到拉黑/单向切断联系的行为"}]
         if "克制住" in text or "留在原地" in text:
             changes.setdefault("events", [])
             changes["events"] = current_state.events + [{"event": "核心成长点", "desc": "行为走向独立"}]
@@ -764,7 +764,9 @@ class SecondPerspectiveCausalEngine:
                 "diagnosis": f"因果链收敛至目标稳态：{target_state}", "fixed_ids": list(fixed_ids)}
 
     def _infer_character(self, text):
-        return ""
+        """兜底角色推断：当事件未显式声明 character 时，提取首个 2-3 字中文名候选。"""
+        m = re.search(r"([\u4e00-\u9fa5]{2,3})", text)
+        return m.group(1) if m else ""
     def _extract_action(self, conclusion):
         for w in self._MOTION_HINTS + self._COMMS_HINTS:
             if w in conclusion:
@@ -823,18 +825,18 @@ class WorldBuilder:
                 "violations": violations, "world_rules": self.world_rules}
 
 
-# ==================== 演示示例 ====================
+# ==================== 演示示例（题材中性） ====================
 if __name__ == "__main__":
     # 极简演示：使用 MockLLM（无API）
     class MockLLM(LLMProvider):
         def generate(self, prompt: str, **kwargs) -> str:
-            return "（模拟的桥接文本）她深吸一口气，将所有情绪压回心底，转身走向站台边缘。电车进站的气流吹起发梢，她的目光追随着那个熟悉的身影，却终究没有迈出那一步。"
+            return "（演示模式：未接入 LLM）角色的内心随事件推进自然转变，情节在此节点平滑演进。接入真实 LLM 后可生成匹配情感状态的文学文本。"
     state = GlobalState()
-    engine = UltimateCausalNovelEngine("自动补全测试", state)
+    engine = UltimateCausalNovelEngine("示例：叙事一致性审计", state)
     engine.set_llm_provider(MockLLM())
     # 使用自然语言大纲
-    outline = "叶婉清拿到诊断报告，得知纵容权重2.7 → 她决定不再纵容 → 在电车站遇到陆景川，克制住没有追上去"
-    chapter = engine.create_chapter_from_outline(1, "决裂", outline)
+    outline = "林夏在评审会上坚持自研方案 → 周舟梳理两套方案利弊 → 林夏意识到忽略成本，同意第三方评审"
+    chapter = engine.create_chapter_from_outline(1, "分歧与选择", outline)
     if chapter:
-        engine.render_chapter(chapter)
-        print(engine.compile_all())
+        content = engine.render_chapter(chapter)
+        print(content)

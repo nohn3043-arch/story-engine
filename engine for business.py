@@ -89,7 +89,7 @@ class LLMProvider(Protocol):
         ...
 
 # =============================================================================
-# ✨ 四万次重构核心：12维高阶情感耦合动力学
+# 12维高阶情感耦合动力学
 # 专为故事生成优化：情感耦合、记忆残留、人际传染、阈值触发
 # =============================================================================
 @dataclass
@@ -103,8 +103,8 @@ class EmotionalMemory:
 @dataclass
 class CharacterPhaseSpace:
     """
-    12维情感相空间，四万次迭代收敛耦合矩阵
-    专为禁忌恋/复杂情感博弈优化
+    12维情感相空间，多轮迭代收敛耦合矩阵
+    适用于复杂情感博弈与人物弧线建模
     """
     character_name: str
     
@@ -112,10 +112,10 @@ class CharacterPhaseSpace:
     attachment: float = 0.5    # 依恋
     restraint: float = 0.5     # 克制
     anxiety: float = 0.5       # 焦虑
-    guilt: float = 0.0         # 愧疚/背德感
+    guilt: float = 0.0         # 愧疚
     desire: float = 0.0        # 欲望
     resentment: float = 0.0    # 怨恨
-    shame: float = 0.0         # 羞耻（禁忌恋核心）
+    shame: float = 0.0         # 羞耻
     longing: float = 0.0       # 思念
     jealousy: float = 0.0      # 嫉妒
     relief: float = 0.0        # 释然
@@ -152,7 +152,7 @@ class CharacterPhaseSpace:
         ]
 
     def _apply_coupling(self) -> None:
-        """✨ 新增：情感耦合效应，四万次迭代最优矩阵"""
+        """情感耦合效应：多轮迭代收敛的耦合矩阵"""
         for source_emo, targets in self.COUPLING_MATRIX.items():
             source_val = getattr(self, source_emo)
             for target_emo, coefficient in targets.items():
@@ -237,7 +237,7 @@ class CharacterPhaseSpace:
         return {k: round(getattr(self, k), 4) for k in self._get_all_emotion_fields()}
 
 # =============================================================================
-# ✨ 四万次重构：多因果动态网络系统
+# 多因果动态网络系统
 # 支持多父多子、因果传导、分叉合并、伏笔追踪
 # =============================================================================
 @dataclass
@@ -252,7 +252,7 @@ class ImplicitAssumption:
 @dataclass
 class CausalNode:
     """
-    多因果动态节点，四万次重构：
+    多因果动态节点：
     - 支持多父多子，形成因果网而非链
     - 支持因果传导系数
     - 支持伏笔标记与自动回收
@@ -294,7 +294,7 @@ class CausalNode:
             self.causal_potential = 1.0
             return 1.0
 
-        # 1. 基础情感驱动力（禁忌恋优化）
+        # 1. 基础情感驱动力
         drive = (
             space.desire * 0.9
             + space.resentment * 0.8
@@ -766,12 +766,14 @@ class CognitiveAuditEngine:
 # 叙事渲染层（情感感知型渲染）
 # =============================================================================
 class MockLLM(LLMProvider):
+    """中性演示渲染器：不依赖任何题材或硬编码角色，仅返回通用占位文本。
+
+    接入真实 LLM（如 DeepSeekProvider）后，可渲染出匹配当前情感张力与
+    故事元素类型的真实文学文本。
+    """
+
     def generate(self, prompt: str, **kwargs) -> str:
-        if '"restraint": 0.9' in prompt or '"restraint": 0.8' in prompt or '"restraint": 0.7' in prompt:
-            return "空气中还残存着消毒水那刺鼻的清冷感，叶婉清死死捏着那份诊断书，指节泛白。胸腔中汹涌的战栗在极高的克制下被强行压缩成一道冰冷的视线，指甲深深嵌进掌心也毫无知觉。当黄昏的站台里，陆景川转头离去的风衣衣角掠过时，她迈出脚步的肌肉硬生生在理性的钢索下死死锁住。没有呼喊，没有追赶，她以近乎审判的冷漠姿态钉在原地，任由长风吹散头发，两人的因果轴自此断裂分流。"
-        if '"desire": 0.8' in prompt or '"shame": 0.7' in prompt:
-            return "狭小的空间里，呼吸都变得滚烫。宋玖凝的指尖触到宋明乘手腕的瞬间，背德感如电流般窜过脊椎，却反而让那份压抑已久的欲望烧得更旺。她想抽回手，身体却不听使唤，羞耻与渴望在血管里疯狂撕扯，眼眶不受控制地泛红。明明知道这是错的，可当他的目光落下来时，所有的克制都在那一刻溃不成军。"
-        return "陆景川毫无顾忌地走上了电车，步伐带着特有的冷漠与笃定。车门即将合拢的磁吸声里，他隐约察觉到身后那道胶着发烫的视线，那是过去一贯对他百般纵容的叶婉清。可内心的依恋曲线早已降至冰点，这种毫无波澜的相空间轨迹让他连一毫米的侧头都显得多余。电车发出沉闷的轰鸣，他连头也没回，顺理成章地将那个熟悉的身影抛在钢铁阴影之外。"
+        return "（演示模式：未接入 LLM）角色的内心随事件推进自然转变，情节在此节点平滑演进。接入 DeepSeekProvider 或任意 LLMProvider 后可渲染出匹配当前情感张力与故事元素类型的真实文学文本。"
 
 class DeepSeekProvider(LLMProvider):
     def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com"):
@@ -809,14 +811,14 @@ class StylisticScribe:
 
 渲染规则：
 1. 严格匹配情感状态，高张力时文风激烈、短句密集；低张力时文风平缓、细节丰富
-2. 禁忌恋题材重点突出「克制与欲望的拉扯」「背德感与依恋的冲突」
+2. 严格按 12 维情感坐标与当前张力渲染，不预设任何题材；矛盾情感的拉扯由坐标值自然呈现
 3. 严禁修改剧情、新增事件、突发转折，仅做文学扩写
 4. 150-300字，符合当前张力水平
 """
         return self.provider.generate(prompt)
 
 # =============================================================================
-# ✨ 主引擎：SPL故事生成四万次重构终极版
+# 主引擎：SPL故事生成引擎
 # =============================================================================
 class SPLStoryGenerationEngine:
     def __init__(self, novel_title: str, init_state: Optional[GlobalCausalState] = None):
@@ -1099,7 +1101,9 @@ class SecondPerspectiveCausalEngine:
 
     # —— 内部工具 ——
     def _infer_character(self, text):
-        return ""
+        """兜底角色推断：当事件未显式声明 character 时，提取首个 2-3 字中文名候选。"""
+        m = re.search(r"([\u4e00-\u9fa5]{2,3})", text)
+        return m.group(1) if m else ""
     def _extract_action(self, conclusion):
         for w in self._MOTION_HINTS + self._COMMS_HINTS:
             if w in conclusion:
@@ -1108,88 +1112,93 @@ class SecondPerspectiveCausalEngine:
 
 
 # =============================================================================
-# 禁忌恋题材演示：宋玖凝/宋明乘
+# 通用叙事一致性审计演示（题材中性）
 # =============================================================================
 if __name__ == "__main__":
-    # 初始化禁忌恋世界观
+    import sys
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+    # 初始化中性世界观（无题材预设）
     init_state = GlobalCausalState(
         world_rules={
-            "禁忌关系阈值": 0.7,
-            "背德感上限": 0.95,
-            "克制崩溃阈值": 0.2
+            "张力预警阈值": 3.5,
+            "动机冲突阈值": 0.7,
         }
     )
 
-    # 宋玖凝：高克制、高愧疚、高欲望的禁忌恋女主
+    # 角色 A：理性克制型
     init_state.add_character(
-        "宋玖凝",
-        {"身份": "名义上的侄女", "人设": "隐忍克制的背德者"},
+        "林夏",
+        {"身份": "工程师", "人设": "理性克制"},
         CharacterPhaseSpace(
-            "宋玖凝",
-            attachment=0.8,
-            restraint=0.85,
-            anxiety=0.6,
-            guilt=0.7,
-            desire=0.75,
-            shame=0.65
+            "林夏",
+            attachment=0.6,
+            restraint=0.8,
+            anxiety=0.3,
+            guilt=0.1,
+            desire=0.4,
+            shame=0.2
         )
     )
 
-    # 宋明乘：低克制、低愧疚、高掌控的禁忌恋男主
+    # 角色 B：温和坚定型
     init_state.add_character(
-        "宋明乘",
-        {"身份": "名义上的小叔", "人设": "冷静掌控的越界者"},
+        "周舟",
+        {"身份": "医生", "人设": "温和坚定"},
         CharacterPhaseSpace(
-            "宋明乘",
-            attachment=0.6,
-            restraint=0.4,
-            anxiety=0.2,
+            "周舟",
+            attachment=0.7,
+            restraint=0.5,
+            anxiety=0.4,
             guilt=0.2,
-            desire=0.8,
+            desire=0.3,
             shame=0.1
         )
     )
 
-    # 启动SPL故事引擎
-    engine = SPLStoryGenerationEngine("烬火", init_state)
+    # 启动 SPL 故事引擎
+    engine = SPLStoryGenerationEngine("示例：叙事一致性审计", init_state)
     # engine.set_llm_provider(DeepSeekProvider("你的API_KEY"))
 
-    # 第一章：禁忌的触碰
+    # 第一章：分歧与选择
     node1 = CausalNode(
-        node_id="SJN_001",
-        character="宋玖凝",
-        raw_narrative="雨夜书房，宋玖凝不小心碰到宋明乘的手",
-        premise="宋玖凝在书房拿书时，指尖触到宋明乘的手腕",
-        conclusion="她瞬间触电般缩回手，背德感席卷全身",
-        emotional_impulse={"shame": 0.15, "guilt": 0.1, "desire": 0.05, "anxiety": 0.1}
+        node_id="LX_001",
+        character="林夏",
+        raw_narrative="方案评审会上，林夏与周舟对技术路线产生分歧",
+        premise="林夏坚持采用自研方案，周舟主张引入成熟方案",
+        conclusion="林夏摆出数据，坚持己见，情绪开始紧绷",
+        emotional_impulse={"anxiety": 0.15, "restraint": -0.05}
     )
 
     node2 = CausalNode(
-        node_id="SMC_001",
-        character="宋明乘",
-        raw_narrative="宋明乘察觉到她的反应，目光落在她泛红的耳尖",
-        premise="宋明乘注意到宋玖凝的躲闪和耳尖的红晕",
-        conclusion="他没有戳破，只是嘴角勾起一抹不易察觉的弧度",
-        emotional_impulse={"desire": 0.1, "restraint": -0.05}
+        node_id="ZZ_001",
+        character="周舟",
+        raw_narrative="周舟察觉林夏的紧绷，放缓语气",
+        premise="周舟注意到林夏语速加快、态度强硬",
+        conclusion="他没有反驳，只是重新梳理了两套方案的利弊",
+        emotional_impulse={"attachment": 0.1, "restraint": 0.05}
     )
 
     node3 = CausalNode(
-        node_id="SJN_002",
-        character="宋玖凝",
-        raw_narrative="宋玖凝想逃，却被宋明乘叫住",
-        premise="宋玖凝转身想离开书房，宋明乘开口叫住她",
-        conclusion="她脚步顿住，心脏狂跳，克制着回头的冲动",
-        emotional_impulse={"anxiety": 0.2, "desire": 0.1, "restraint": -0.1}
+        node_id="LX_002",
+        character="林夏",
+        raw_narrative="林夏意识到自己的固执，态度软化",
+        premise="林夏听完周舟的梳理，发现自己忽略了成本因素",
+        conclusion="她沉默片刻，同意纳入第三方评审再定",
+        emotional_impulse={"anxiety": -0.2, "guilt": 0.1, "attachment": 0.1}
     )
 
     engine.process_chapter(
         chapter_id=1,
-        title="雨夜的触碰",
+        title="分歧与选择",
         raw_nodes=[node1, node2, node3],
-        target_tension=0.7
+        target_tension=0.5
     )
 
     print("\n" + "="*60)
-    print("✨ SPL四万次重构 · 禁忌恋故事生成演示")
+    print("SPL 叙事一致性审计 · 通用演示")
     print("="*60)
     print(engine.compile_all())
