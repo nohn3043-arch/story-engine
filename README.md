@@ -10,14 +10,14 @@
 </p>
 
 <blockquote align="center">
-  <em>Long-Form Narrative Consistency Engine</em>
+  <em>长篇叙事一致性引擎</em>
 </blockquote>
 
 <div style="max-width:880px;margin:0 auto;padding:0 16px">
 
-## ✦ About
+## ✦ 关于
 
-<p style="font-size:15px;line-height:1.8;color:#2C2C2C">STORY-ENGINE is a narrative consistency checking engine for long-form fiction, performing automated audits on character settings, causal timelines, and memory threads to ensure million-word works remain coherent across characters, plots, and worldbuilding. It transforms an editor's intuitive checks into a reusable, structured pipeline.</p>
+<p style="font-size:15px;line-height:1.8;color:#2C2C2C">STORY-ENGINE 是面向长篇小说的叙事一致性校验引擎，对人设、因果时间线与记忆线索进行自动化审计，确保百万字作品在人物、剧情、世界观层面保持自洽。它把编辑的直觉性检查转化为可复用、结构化的流水线。</p>
 
 <p align="center">
   <img src="assets/overview.png" alt="STORY-ENGINE overview" style="width:100%">
@@ -27,48 +27,48 @@
 
 <p align="center">— ✦ —</p>
 
-## ✦ Quick Start
+## ✦ 快速开始
 
 ```bash
-# Primary: GitHub
+# 主源：GitHub
 git clone https://github.com/nohn3043-arch/story-engine.git
-# Mirror: Gitee
+# 镜像：Gitee（本仓库）
 # git clone https://gitee.com/sjiun/Story-engine.git
 cd Story-engine
-# Pure Python ≥3.8. Engine files use spaces in their names by design.
-python "Story Engine for Creator.py"      # creator-facing cognitive audit engine
-# or: python "engine for business.py"     # SPL four-stage editorial pipeline
+# 纯 Python ≥3.8。引擎文件按设计使用空格命名。
+python "Story Engine for Creator.py"      # 面向创作者的第二视角认知审计引擎
+# 或：python "engine for business.py"     # SPL 四阶段编辑流水线
 ```
 
 <p align="center">— ✦ —</p>
 
-## ✦ What It Does
+## ✦ 功能
 
 <div style="max-width:880px;margin:0 auto;padding:0 16px">
 
-STORY-ENGINE audits long-form fiction for narrative consistency, turning an editor's intuition into a reusable, structured pipeline. It works in two layers:
+STORY-ENGINE 对长篇叙事进行一致性审计，将编辑直觉转化为可复用、结构化的流水线。双层架构：
 
-- **Creator engine** (`Story Engine for Creator.py`) — a cognitive-audit layer for storytelling:
-  - `ResponsibilityAccount` — every check is anchored to a named accountable node (who / role / stage).
-  - `CognitiveAuditEngine` + pluggable `AuditPlugin`s + `EmotionalConstraint` — composable audit dimensions.
-  - `CausalNode` with `implicit_assumptions` and a `vulnerability_score` — traces *because → so* logic and grades fragility.
-  - `NarrativeStripper` / `ImplicitAssumptionDetector` / `VulnerabilityAssessor` — the second-perspective operator pipeline.
-  - `AutomaticRepairEngine` / `UltimateCausalNovelEngine` / `SecondPerspectiveCausalEngine` / `WorldBuilder` — repair, full-novel audit and world-construction layers.
-- **Business engine** (`engine for business.py`) — the SPL four-stage native reasoning pipeline:
-  1. `STRIP_NARRATIVE` — identify story elements (foreshadow / turn / climax / setup).
-  2. `SCAN_ASSUMPTION` — `ImplicitAssumptionScanner` verifies character motive & plot-logic soundness.
-  3. `HEDGE_RISK` — `VulnerabilityHedge` flags OOC, logic holes, pacing problems; `CausalIntersectionBroker` merges world-lines.
-  4. `LOCK_RESPONSIBILITY` — emit a quality score with traceable optimizations.
-  - Risk levels: `SAFE` / `WARNING` / `CRITICAL` / `FATAL`; node states: `RAW` / `STRIPPED` / `AUDITED` / `PRUNED` / `ACTIVE`.
-  - `SPLStoryGenerationEngine` + `StylisticScribe` drive generation; `DeepSeekProvider` / `MockLLM` are the swappable LLM backends.
+- **创作者引擎**（`Story Engine for Creator.py`）——面向叙事的认知审计层：
+  - `ResponsibilityAccount`——每项检查锚定到具名责任节点（谁 / 角色 / 阶段）。
+  - `CognitiveAuditEngine` + 可插拔 `AuditPlugin` + `EmotionalConstraint`——可组合审计维度。
+  - `CausalNode` 携带 `implicit_assumptions` 与 `vulnerability_score`——追踪 *因为 → 所以* 逻辑并量化脆弱性。
+  - `NarrativeStripper` / `ImplicitAssumptionDetector` / `VulnerabilityAssessor`——第二视角算子流水线。
+  - `AutomaticRepairEngine` / `UltimateCausalNovelEngine` / `SecondPerspectiveCausalEngine` / `WorldBuilder`——修复、全书审计与世界观构建层。
+- **业务引擎**（`engine for business.py`）——SPL 四阶段原生推理流水线：
+  1. `STRIP_NARRATIVE`——识别叙事元素（伏笔 / 转折 / 高潮 / 铺垫）。
+  2. `SCAN_ASSUMPTION`——`ImplicitAssumptionScanner` 校验动机与剧情逻辑。
+  3. `HEDGE_RISK`——`VulnerabilityHedge` 标记 OOC、逻辑漏洞、节奏问题；`CausalIntersectionBroker` 合并世界线。
+  4. `LOCK_RESPONSIBILITY`——输出带可追溯优化的质量评分。
+  - 风险级别：`SAFE` / `WARNING` / `CRITICAL` / `FATAL`；节点状态：`RAW` / `STRIPPED` / `AUDITED` / `PRUNED` / `ACTIVE`。
+  - `SPLStoryGenerationEngine` + `StylisticScribe` 驱动生成；`DeepSeekProvider` / `MockLLM` 为可替换 LLM 后端。
 
-Both layers share the same cognitive-audit core as the Second-Perspective engine — this is the audit discipline applied to narrative, rather than to decision-making.
+两层共享与第二视角引擎相同的认知审计内核——这是将审计纪律应用于叙事，而非决策。
 
 </div>
 
 <p align="center">— ✦ —</p>
 
-## ✦ Usage
+## ✦ 使用
 
 <div style="max-width:880px;margin:0 auto;padding:0 16px">
 
@@ -83,7 +83,7 @@ biz = load("biz", "engine for business.py")
 print([s.name for s in biz.SPLStage])   # STRIP_NARRATIVE … LOCK_RESPONSIBILITY
 ```
 
-Or run the bundled engines directly:
+或直接运行内置引擎：
 
 ```bash
 python "Story Engine for Creator.py"
@@ -94,51 +94,49 @@ python "engine for business.py"
 
 <p align="center">— ✦ —</p>
 
-## ✦ Project Structure
+## ✦ 项目结构
 
 ```
 STORY-ENGINE/
-├── Story Engine for Creator.py    # creator-facing cognitive audit engine
-├── engine for business.py         # SPL four-stage editorial reasoning pipeline
+├── Story Engine for Creator.py    # 面向创作者的认知审计引擎
+├── engine for business.py         # SPL 四阶段编辑推理流水线
 ├── assets/                        # banner.svg/png, overview.svg/png
 └── LICENSE
 ```
 
 <p align="center">— ✦ —</p>
 
-## ✦ Ecosystem
+## ✦ 生态
 
-STORY-ENGINE is one member of the NOHN AI ecosystem — a family of projects built around second-perspective causal audit and deterministic execution:
+STORY-ENGINE 是 NOHN AI 生态的一员——围绕第二视角因果审计与确定性执行构建的项目家族：
 
-| Project | Repository | What it is |
+| 项目 | 仓库 | 定位 |
 |---|---|---|
-| **Second-Perspective (GCAE)** | [nohn3043-arch/second-perspective](https://github.com/nohn3043-arch/second-perspective) | Global cognitive audit engine — the five-operator causal audit core (IMDA 95/100) |
-| **NOMOS** | [nohn3043-arch/second-perspective](https://github.com/nohn3043-arch/second-perspective) (`Intelligent-Decision-Hub--Nomos` branch) | Auditable deterministic decision hub (IMDA 95/100) |
-| **SPL-G1** | [nohn3043-arch/SPL-G1-General-purpose-processor](https://github.com/nohn3043-arch/SPL-G1-General-purpose-processor) | Hardware causal-audit Trusted Compute Unit (TCU) |
-| **SPL-Virtual-World-Base** | [nohn3043-arch/Second-Reality](https://github.com/nohn3043-arch/Second-Reality) | Virtual-world & metaverse infrastructure (Constitution / Law / Bridge) |
-| **Story-Engine** | [nohn3043-arch/story-engine](https://github.com/nohn3043-arch/story-engine) | Long-form narrative consistency engine |
-| **Antares** | [nohn3043-arch/Antares](https://github.com/nohn3043-arch/Antares) | GFSIP v1.0 — federated stable interoperability protocol with causal audit |
-| **Anthropomorphic-Agent-Engine** | [nohn3043-arch/Anthropomorphic-Agent-Engine](https://github.com/nohn3043-arch/Anthropomorphic-Agent-Engine) | Deterministic anthropomorphic psychology engine (SPL Pure Core V8.0) |
-| **PAGES** | [nohn3043-arch/pages](https://github.com/nohn3043-arch/pages) | Official NOHN AI ecosystem landing page |
+| **Second-Perspective (GCAE)** | [nohn3043-arch/second-perspective](https://github.com/nohn3043-arch/second-perspective) | 全局认知审计引擎——五算子因果审计内核（IMDA 95/100） |
+| **NOMOS** | [nohn3043-arch/second-perspective](https://github.com/nohn3043-arch/second-perspective)（`Intelligent-Decision-Hub--Nomos` 分支） | 可审计确定性决策中心（IMDA 95/100） |
+| **SPL-G1** | [nohn3043-arch/SPL-G1](https://github.com/nohn3043-arch/SPL-G1) | 硬件因果审计可信计算单元（TCU） |
+| **SPL-Virtual-World-Base** | [nohn3043-arch/Second-Reality](https://github.com/nohn3043-arch/Second-Reality) | 虚拟世界与元宇宙基础设施（宪法 / 法律 / 桥梁） |
+| **Story-Engine** | [nohn3043-arch/story-engine](https://github.com/nohn3043-arch/story-engine) | 长篇叙事一致性引擎 |
+| **Antares** | [nohn3043-arch/Antares](https://github.com/nohn3043-arch/Antares) | GFSIP v1.0——带因果审计的联邦稳定互操作协议 |
+| **Anthropomorphic-Agent-Engine** | [nohn3043-arch/Anthropomorphic-Agent-Engine](https://github.com/nohn3043-arch/Anthropomorphic-Agent-Engine) | 确定性拟人心理引擎（SPL Pure Core V8.0） |
+| **PAGES** | [nohn3043-arch/pages](https://github.com/nohn3043-arch/pages) | NOHN AI 生态官方落地页 |
 
 <p align="center">— ✦ —</p>
 
-## ✦ License & Authorization
+## ✦ 许可与授权
 
-This repository is **not open-source**. It uses a dual-track model: free for individual non-commercial research; paid commercial authorization required for government / enterprise. See [LICENSE](./LICENSE).
+本仓库**非开源**，采用双轨模式：个人非商业研究免费；政府 / 企业需付费商业授权。详见 [LICENSE](./LICENSE)。
 
-| User | Purpose | License Requirement |
-|------|---------|---------------------|
-| Individual (natural person) | Non-commercial academic research / study / personal experimentation | **Free** under the "Free Individual Research License" in [LICENSE](./LICENSE) |
-| Government agency / public institution / enterprise | Any purpose (incl. internal deployment, product development, service provision) | **Requires prior written paid authorization** |
+| 用户 | 用途 | 许可要求 |
+|---|---|---|
+| 个人（自然人） | 非商业学术研究 / 学习 / 个人实验 | [LICENSE](./LICENSE)「个人免费研究许可」下**免费** |
+| 政府机关 / 公共机构 / 企业 | 任何用途（含内部部署、产品开发、服务提供） | **须事先签署付费商业授权** |
 
-- **Individual researchers** may use the Work free of charge for non-commercial research under [LICENSE](./LICENSE), but not for any commercial purpose, nor to provide services to any enterprise or government organization.
-- **Government / enterprise users** may not copy, deploy, run, integrate, or distribute the Work before signing a Commercial Authorization Agreement and paying the agreed fee.
-- **Apply for authorization**:
-  - International / Global: [ai@nohnlins.com](mailto:ai@nohnlins.com)
-  - China: [lin@secondai.top](mailto:lin@secondai.top)
+- **个人研究者**可免费用于非商业研究，但不得用于任何商业用途，也不得向任何企业或政府机构提供服务。
+- **政府 / 企业用户**在签署商业授权协议并支付约定费用前，不得复制、部署、运行、集成或分发本工作。
+- **申请授权**：国际 / 全球 — [ai@nohnlins.com](mailto:ai@nohnlins.com) · 中国 — [lin@secondai.top](mailto:lin@secondai.top)
 
-The licensor, governing law, and dispute resolution are determined by the user's location as set out in [LICENSE](./LICENSE): users within the PRC → Shanghai Linming Junhua Technology Co., Ltd. (laws of the PRC); users outside the PRC → NOHN AI TECHNOLOGY PTE. LTD. (laws of Singapore, SIAC arbitration).
+许可人、适用法律与争议解决依 [LICENSE](./LICENSE) 按用户所在地确定：中国境内用户 → 上海霖铭骏华科技有限公司（中国法律）；境外用户 → NOHN AI TECHNOLOGY PTE. LTD.（新加坡法律，SIAC 仲裁）。
 
 <p align="center">
   <a href="https://github.com/nohn3043-arch">GitHub</a>
