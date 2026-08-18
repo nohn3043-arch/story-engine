@@ -1,0 +1,32 @@
+{
+  "doc_type": "generic",
+  "rules": [
+    {
+      "id": "COM-001",
+      "category": "用词规范",
+      "severity": "WARNING",
+      "kind": "risk_keywords",
+      "patterns": ["尽快", "适当", "酌情", "视情况", "等"],
+      "message": "存在模糊时间/程度词，责任边界不清",
+      "suggestion": "改为可量化的时限或标准"
+    },
+    {
+      "id": "COM-002",
+      "category": "风险条款",
+      "severity": "CRITICAL",
+      "kind": "risk_keywords",
+      "patterns": ["概不负责", "最终解释权", "概不退换", "不承担任何责任"],
+      "message": "单方免责条款，可能被认定无效",
+      "suggestion": "删除或改为双方对等责任条款"
+    },
+    {
+      "id": "COM-003",
+      "category": "用词规范",
+      "severity": "WARNING",
+      "kind": "risk_keywords",
+      "patterns": ["绝对", "百分之百", "永不", "一切"],
+      "message": "绝对化用语，易引发歧义或承诺过载",
+      "suggestion": "替换为限定性表述"
+    }
+  ]
+}

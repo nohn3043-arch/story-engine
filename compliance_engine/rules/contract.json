@@ -1,0 +1,50 @@
+{
+  "doc_type": "contract",
+  "rules": [
+    {
+      "id": "CT-001",
+      "category": "风险条款",
+      "severity": "CRITICAL",
+      "kind": "risk_keywords",
+      "patterns": ["最终解释权", "概不负责", "单方解除", "无条件", "免责"],
+      "message": "存在单方优势或免责条款",
+      "suggestion": "调整为双方对等条款"
+    },
+    {
+      "id": "CT-002",
+      "category": "合规红线",
+      "severity": "FATAL",
+      "kind": "regex",
+      "pattern": "最低工资.{0,8}(低于|不足)",
+      "message": "劳动报酬条款可能违反最低工资标准",
+      "suggestion": "核对当地最低工资标准"
+    },
+    {
+      "id": "CT-003",
+      "category": "合规红线",
+      "severity": "FATAL",
+      "kind": "regex",
+      "pattern": "违约金.{0,10}(超过|高于).{0,4}(30%|百分之三十)",
+      "message": "违约金比例可能超过法定上限",
+      "suggestion": "违约金不超过实际损失的30%"
+    },
+    {
+      "id": "CT-004",
+      "category": "合规红线",
+      "severity": "FATAL",
+      "kind": "regex",
+      "pattern": "加班.{0,8}(无补偿|不支付|没有加班费)",
+      "message": "加班无补偿条款违反劳动法",
+      "suggestion": "按法定标准支付加班费"
+    },
+    {
+      "id": "CT-005",
+      "category": "风险条款",
+      "severity": "CRITICAL",
+      "kind": "risk_keywords",
+      "patterns": ["押金", "保证金"],
+      "message": "押金/保证金条款需明确返还条件与时限",
+      "suggestion": "补充返还条件、时限与利息约定"
+    }
+  ]
+}

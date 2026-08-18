@@ -1,0 +1,32 @@
+{
+  "doc_type": "official_doc",
+  "rules": [
+    {
+      "id": "OD-001",
+      "category": "格式规范",
+      "severity": "CRITICAL",
+      "kind": "regex",
+      "pattern": "\\d{4}[./-]\\d{1,2}[./-]\\d{1,2}",
+      "message": "日期格式不规范",
+      "suggestion": "使用「YYYY年MM月DD日」格式"
+    },
+    {
+      "id": "OD-002",
+      "category": "格式规范",
+      "severity": "WARNING",
+      "kind": "regex",
+      "pattern": "请示[^。]{0,20}(报告|汇报)",
+      "message": "请示与报告文种混用",
+      "suggestion": "请示用于请求指示，报告用于汇报工作"
+    },
+    {
+      "id": "OD-003",
+      "category": "用词规范",
+      "severity": "WARNING",
+      "kind": "risk_keywords",
+      "patterns": ["大概", "大约", "差不多"],
+      "message": "公文用词含糊",
+      "suggestion": "使用精确数字与表述"
+    }
+  ]
+}

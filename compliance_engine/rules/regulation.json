@@ -1,0 +1,32 @@
+{
+  "doc_type": "regulation",
+  "rules": [
+    {
+      "id": "RG-001",
+      "category": "职责权限",
+      "severity": "WARNING",
+      "kind": "risk_keywords",
+      "patterns": ["相关部门", "有关人员", "视情况"],
+      "message": "职责主体不明确",
+      "suggestion": "明确到具体部门或岗位"
+    },
+    {
+      "id": "RG-002",
+      "category": "合规红线",
+      "severity": "CRITICAL",
+      "kind": "risk_keywords",
+      "patterns": ["未经审批", "自行决定", "擅自"],
+      "message": "存在未经审批即可执行的权限漏洞",
+      "suggestion": "补充审批流程与权限边界"
+    },
+    {
+      "id": "RG-003",
+      "category": "风险条款",
+      "severity": "WARNING",
+      "kind": "risk_keywords",
+      "patterns": ["有权", "可以自行"],
+      "message": "权限表述宽泛，需界定边界",
+      "suggestion": "明确权限范围与限制条件"
+    }
+  ]
+}
