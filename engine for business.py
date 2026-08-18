@@ -3,12 +3,295 @@ import json
 import re
 import math
 import dataclasses
+import copy
 import traceback
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Protocol, Set, Tuple, Callable
 from collections import defaultdict, deque
 from enum import Enum, auto
+
+# =============================================================================
+# 引擎隔离防护
+# =============================================================================
+# 本文件是 Business 引擎。同目录「Story Engine for Creator.py」是 Creator 引擎。
+# 两个引擎含多个同名异构数据类（CausalNode / ResponsibilityAccount / ImplicitAssumption /
+# CognitiveAuditEngine / NarrativeStripper …），字段与接口不兼容：混用会导致类互相覆盖、
+# 数据错乱甚至崩溃。唯一例外：SecondPerspectiveCausalEngine（第二视角五步因果内核）
+# 在两个引擎中实现完全一致，可安全共享。
+_ENGINE_FINGERPRINT = "business"
+
+
+def check_engine_isolation() -> List[str]:
+    """检测当前进程是否同时加载了 Creator 与 Business 两个引擎，返回冲突描述列表（空 = 安全）。"""
+    import sys
+
+    conflicts: List[str] = []
+    for mod_name, mod in list(sys.modules.items()):
+        if mod is None or mod_name == __name__:
+            continue
+        fp = getattr(mod, "_ENGINE_FINGERPRINT", None)
+        if fp is not None and fp != _ENGINE_FINGERPRINT:
+            conflicts.append(
+                f"检测到 Creator 引擎（模块 {mod_name!r}）与 Business 引擎同时加载："
+                "两者同名数据类（CausalNode 等）字段不兼容，混用会导致数据错乱、程序崩溃。"
+                "请勿在同一进程混用两个引擎；唯一可安全共享的是 SecondPerspectiveCausalEngine。"
+            )
+    return conflicts
+
+
+# =============================================================================
+# 角色名候选可信度过滤（防「坚持己见→坚持己」「他说→他说」「下雨了→下雨了」式乱认）
+# 与 Creator 引擎保持同一份实现，确保两引擎口径一致。
+# =============================================================================
+_NAME_PRONOUN_HEADS = (
+    "他",
+    "她",
+    "它",
+    "我",
+    "你",
+    "咱",
+    "吾",
+    "汝",
+    "其",
+    "这",
+    "那",
+    "我们",
+    "你们",
+    "他们",
+    "她们",
+    "它们",
+)
+_NAME_VERB_HEADS = (
+    "说",
+    "道",
+    "问",
+    "答",
+    "喊",
+    "叫",
+    "想",
+    "看",
+    "听",
+    "走",
+    "跑",
+    "来",
+    "去",
+    "是",
+    "有",
+    "在",
+    "坚持",
+    "认为",
+    "觉得",
+    "决定",
+    "意识",
+    "同意",
+    "评估",
+    "梳理",
+    "分析",
+    "理解",
+    "发现",
+    "感到",
+    "知道",
+    "离开",
+    "来到",
+    "回到",
+    "前往",
+    "看见",
+    "听到",
+    "想起",
+    "望着",
+    "看着",
+    "听见",
+    "点头",
+    "摇头",
+    "沉默",
+    "开口",
+    "转身",
+    "回头",
+    "抬头",
+    "低头",
+    "坐下",
+    "起身",
+    "推开",
+    "关上",
+    "拿起",
+    "放下",
+    "掏出",
+    "停下",
+    "愣住",
+    "怔住",
+    "惊醒",
+    "醒来",
+    "出门",
+    "进屋",
+)
+_NAME_TAIL_NOISE = (
+    "在",
+    "去",
+    "来",
+    "说",
+    "道",
+    "了",
+    "着",
+    "过",
+    "和",
+    "与",
+    "跟",
+    "吧",
+    "呢",
+    "吗",
+    "啊",
+    "呀",
+    "么",
+    "哈",
+    "哦",
+    "走",
+    "问",
+    "答",
+    "喊",
+    "叫",
+    "想",
+    "看",
+    "听",
+    "见",
+    "一起",
+    "前往",
+    "来到",
+    "回到",
+    "离开",
+    "看着",
+    "梳理",
+    "理",
+    "梳",
+    "意识",
+    "同意",
+    "评估",
+    "决定",
+    "认为",
+    "觉得",
+    "意识到",
+    "发现",
+    "感到",
+    "知道",
+)
+_NAME_FULL_NOISE = (
+    "下雨",
+    "下雪",
+    "刮风",
+    "起风",
+    "打雷",
+    "闪电",
+    "天亮",
+    "天黑",
+    "夜幕",
+    "黄昏",
+    "清晨",
+    "午夜",
+    "正午",
+    "夜晚",
+    "白天",
+    "晚上",
+    "早晨",
+    "下午",
+    "中午",
+    "街道",
+    "房间",
+    "车站",
+    "站台",
+    "城市",
+    "村庄",
+    "森林",
+    "大海",
+    "天空",
+    "大地",
+    "世界",
+    "战场",
+    "广场",
+    "众人",
+    "两人",
+    "双方",
+    "一人",
+    "三人",
+    "大家",
+    "所有人",
+    "主角",
+    "旁白",
+    "镜头",
+    "画面",
+    "场景",
+    "天气",
+    "故事",
+    "剧情",
+    "情节",
+    "然后",
+    "于是",
+    "但是",
+    "不过",
+    "因为",
+    "所以",
+    "如果",
+    "虽然",
+    "突然",
+    "终于",
+    "毕竟",
+    "居然",
+    "竟然",
+    "我们",
+    "你们",
+    "他们",
+    "她们",
+    "它们",
+    "自己",
+    "彼此",
+)
+_NAME_FOLLOW_RE = re.compile(
+    r"([\u4e00-\u9fa5]{2,3})(?=(?:意识到|觉得|认为|坚持|决定|同意|梳理|评估|分析|理解|"
+    r"发现|感到|知道|说道|离开|来到|回到|前往|看着|听见|想起|点头|摇头|沉默|开口|"
+    r"转身|回头|抬头|低头|坐下|起身|推开|关上|拿起|放下|掏出|停下|愣住|怔住|惊醒|"
+    r"醒来|出门|进屋|盘坐|走入|走进|站在|望着|听着|打量|伸手|握住|松开|深吸|叹息|"
+    r"皱眉|轻笑|沉声|低声|高声|忽然|终于|缓缓|慢慢|渐渐|随即|径直|直接|继续|说|道|"
+    r"问|喊|答|在|了|着|过|的|地|得|和|与|跟|，|。|；|！|？|：|,|;|!|\\?|:|$))"
+)
+
+
+def _clean_name_candidate(cand: str) -> str:
+    """剥去候选名尾部的动词/虚词残片（如「林夏在」→「林夏」）。"""
+    base = cand
+    while len(base) > 1 and base.endswith(_NAME_TAIL_NOISE):
+        base = base[:-1]
+    return base
+
+
+def _is_plausible_name(name: str) -> bool:
+    """判断候选名是否像真实角色名（排除代词、动词短语、天气/场景词等非人名）。"""
+    if len(name) < 2:
+        return False
+    if name.startswith(_NAME_PRONOUN_HEADS):
+        return False
+    if name in _NAME_FULL_NOISE:
+        return False
+    if any(name.startswith(h) for h in _NAME_VERB_HEADS):
+        return False
+    return True
+
+
+def _extract_plausible_name(text: str) -> str:
+    """从文本中提取第一个可信角色名；找不到返回空串（宁缺毋滥，绝不乱认）。"""
+    if not text:
+        return ""
+    # 1) 说话者模式：「XX说/道/问/喊…」
+    m = re.search(r"([\u4e00-\u9fa5]{2,4})(?:说道|答道|回答|说|道|问|喊|叫)", text)
+    if m:
+        name = _clean_name_candidate(m.group(1))
+        if _is_plausible_name(name):
+            return name
+    # 2) 通用候选：2~3 字窗口 + 后随动作/虚词/标点
+    for m in _NAME_FOLLOW_RE.finditer(text):
+        name = _clean_name_candidate(m.group(1))
+        if _is_plausible_name(name):
+            return name
+    return ""
+
 
 # =============================================================================
 # 基础工具与序列化
@@ -22,21 +305,24 @@ def _json_default(obj):
         return list(obj)
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
+
 # =============================================================================
 # SPL 故事原生四阶推理枚举
 # =============================================================================
 class SPLStage(Enum):
-    STRIP_NARRATIVE = auto()    # 1. 叙事剥离：识别故事元素（伏笔/转折/高潮/铺垫）
-    SCAN_ASSUMPTION = auto()   # 2. 内隐假设：校验人物动机、情节逻辑合理性
-    HEDGE_RISK = auto()        # 3. 脆弱性对冲：识别OOC、逻辑漏洞、节奏问题
-    LOCK_RESPONSIBILITY = auto()# 4. 责任闭环：输出故事质量评分、可追溯优化
-    RECONSTRUCT = auto()       # 5. 因果重构（第二视角五步因果推理内核）
+    STRIP_NARRATIVE = auto()  # 1. 叙事剥离：识别故事元素（伏笔/转折/高潮/铺垫）
+    SCAN_ASSUMPTION = auto()  # 2. 内隐假设：校验人物动机、情节逻辑合理性
+    HEDGE_RISK = auto()  # 3. 脆弱性对冲：识别OOC、逻辑漏洞、节奏问题
+    LOCK_RESPONSIBILITY = auto()  # 4. 责任闭环：输出故事质量评分、可追溯优化
+    RECONSTRUCT = auto()  # 5. 因果重构（第二视角五步因果推理内核）
+
 
 class RiskLevel(Enum):
     SAFE = auto()
     WARNING = auto()
     CRITICAL = auto()
     FATAL = auto()
+
 
 class NodeStatus(Enum):
     RAW = auto()
@@ -46,17 +332,20 @@ class NodeStatus(Enum):
     ACTIVE = auto()
     FROZEN = auto()
     FORESHADOW = auto()  # 新增：伏笔节点
-    MERGED = auto()      # 新增：合并节点
+    MERGED = auto()  # 新增：合并节点
+
 
 class StoryElementType(Enum):
     """故事元素分类，叙事剥离阶段自动识别"""
-    FORESHADOW = auto()   # 伏笔
-    TURNING_POINT = auto()# 转折
-    CLIMAX = auto()       # 高潮
-    PADDING = auto()      # 铺垫
-    DIALOGUE = auto()     # 对话
-    ACTION = auto()       # 动作
-    PSYCHOLOGY = auto()   # 心理
+
+    FORESHADOW = auto()  # 伏笔
+    TURNING_POINT = auto()  # 转折
+    CLIMAX = auto()  # 高潮
+    PADDING = auto()  # 铺垫
+    DIALOGUE = auto()  # 对话
+    ACTION = auto()  # 动作
+    PSYCHOLOGY = auto()  # 心理
+
 
 # =============================================================================
 # 责任闭环锚定层
@@ -69,6 +358,7 @@ class TraceLog:
     node_id: Optional[str]
     remark: str
     trace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
 
 @dataclass
 class ResponsibilityAccount:
@@ -84,9 +374,10 @@ class ResponsibilityAccount:
         self.trace_chain.append(f"{stage_name}|{uuid.uuid4().hex[:6]}")
         return True
 
+
 class LLMProvider(Protocol):
-    def generate(self, prompt: str, **kwargs) -> str:
-        ...
+    def generate(self, prompt: str, **kwargs) -> str: ...
+
 
 # =============================================================================
 # 12维高阶情感耦合动力学
@@ -95,10 +386,12 @@ class LLMProvider(Protocol):
 @dataclass
 class EmotionalMemory:
     """情感记忆单元，保留事件情感残留"""
+
     event_id: str
     emotion_vector: Dict[str, float]
     decay_rate: float = 0.05  # 每步衰减率
     remaining_strength: float = 1.0
+
 
 @dataclass
 class CharacterPhaseSpace:
@@ -106,49 +399,62 @@ class CharacterPhaseSpace:
     12维情感相空间，多轮迭代收敛耦合矩阵
     适用于复杂情感博弈与人物弧线建模
     """
+
     character_name: str
-    
+
     # 核心情感维度（0~1）
-    attachment: float = 0.5    # 依恋
-    restraint: float = 0.5     # 克制
-    anxiety: float = 0.5       # 焦虑
-    guilt: float = 0.0         # 愧疚
-    desire: float = 0.0        # 欲望
-    resentment: float = 0.0    # 怨恨
-    shame: float = 0.0         # 羞耻
-    longing: float = 0.0       # 思念
-    jealousy: float = 0.0      # 嫉妒
-    relief: float = 0.0        # 释然
-    hope: float = 0.0          # 期待
-    despair: float = 0.0       # 绝望
+    attachment: float = 0.5  # 依恋
+    restraint: float = 0.5  # 克制
+    anxiety: float = 0.5  # 焦虑
+    guilt: float = 0.0  # 愧疚
+    desire: float = 0.0  # 欲望
+    resentment: float = 0.0  # 怨恨
+    shame: float = 0.0  # 羞耻
+    longing: float = 0.0  # 思念
+    jealousy: float = 0.0  # 嫉妒
+    relief: float = 0.0  # 释然
+    hope: float = 0.0  # 期待
+    despair: float = 0.0  # 绝望
 
     # 动力学参数
     base_damping: float = field(default=0.12)
     coupling_strength: float = field(default=0.08)  # 情感耦合强度
-    memory_capacity: int = field(default=10)       # 情感记忆容量
+    memory_capacity: int = field(default=10)  # 情感记忆容量
 
     # 情感记忆队列（最近N个事件的情感残留）
     emotional_memory: deque = field(default_factory=lambda: deque(maxlen=10))
     # 情感耦合矩阵：A情感对B情感的影响系数
-    COUPLING_MATRIX: Dict[str, Dict[str, float]] = field(default_factory=lambda: {
-        # 焦虑放大欲望、削弱克制
-        "anxiety": {"desire": 0.15, "restraint": -0.2},
-        # 愧疚放大克制、削弱欲望
-        "guilt": {"restraint": 0.25, "desire": -0.3},
-        # 欲望削弱克制、放大焦虑
-        "desire": {"restraint": -0.2, "anxiety": 0.1},
-        # 克制放大愧疚、削弱欲望
-        "restraint": {"guilt": 0.1, "desire": -0.15},
-        # 羞耻放大克制、放大焦虑
-        "shame": {"restraint": 0.3, "anxiety": 0.2},
-        # 依恋放大思念、放大愧疚
-        "attachment": {"longing": 0.2, "guilt": 0.1},
-    })
+    COUPLING_MATRIX: Dict[str, Dict[str, float]] = field(
+        default_factory=lambda: {
+            # 焦虑放大欲望、削弱克制
+            "anxiety": {"desire": 0.15, "restraint": -0.2},
+            # 愧疚放大克制、削弱欲望
+            "guilt": {"restraint": 0.25, "desire": -0.3},
+            # 欲望削弱克制、放大焦虑
+            "desire": {"restraint": -0.2, "anxiety": 0.1},
+            # 克制放大愧疚、削弱欲望
+            "restraint": {"guilt": 0.1, "desire": -0.15},
+            # 羞耻放大克制、放大焦虑
+            "shame": {"restraint": 0.3, "anxiety": 0.2},
+            # 依恋放大思念、放大愧疚
+            "attachment": {"longing": 0.2, "guilt": 0.1},
+        }
+    )
 
     def _get_all_emotion_fields(self) -> List[str]:
         return [
-            "attachment", "restraint", "anxiety", "guilt", "desire", "resentment",
-            "shame", "longing", "jealousy", "relief", "hope", "despair"
+            "attachment",
+            "restraint",
+            "anxiety",
+            "guilt",
+            "desire",
+            "resentment",
+            "shame",
+            "longing",
+            "jealousy",
+            "relief",
+            "hope",
+            "despair",
         ]
 
     def _apply_coupling(self) -> None:
@@ -165,20 +471,22 @@ class CharacterPhaseSpace:
         """✨ 新增：情感记忆残留，模拟情绪的延续性"""
         to_remove = []
         for mem in self.emotional_memory:
-            mem.remaining_strength *= (1 - mem.decay_rate)
+            mem.remaining_strength *= 1 - mem.decay_rate
             if mem.remaining_strength < 0.01:
                 to_remove.append(mem)
                 continue
-            
+
             for emo, val in mem.emotion_vector.items():
                 current = getattr(self, emo)
                 delta = val * mem.remaining_strength * 0.1
                 setattr(self, emo, max(0.001, min(0.999, current + delta)))
-        
+
         for mem in to_remove:
             self.emotional_memory.remove(mem)
 
-    def apply_event_impulse(self, impulse: Dict[str, float], event_id: str = "", dt: float = 1.0) -> Dict[str, float]:
+    def apply_event_impulse(
+        self, impulse: Dict[str, float], event_id: str = "", dt: float = 1.0
+    ) -> Dict[str, float]:
         """
         高阶情感动力学方程：
         dE/dt = -damping*E + 耦合效应 + 记忆残留 + 外部脉冲
@@ -201,13 +509,17 @@ class CharacterPhaseSpace:
 
         # 4. 记录情感记忆
         if event_id:
-            self.emotional_memory.append(EmotionalMemory(
-                event_id=event_id,
-                emotion_vector={k: impulse.get(k, 0.0) for k in emo_fields}
-            ))
+            self.emotional_memory.append(
+                EmotionalMemory(
+                    event_id=event_id,
+                    emotion_vector={k: impulse.get(k, 0.0) for k in emo_fields},
+                )
+            )
 
         new_state = self.to_dict()
-        delta_report = {f"delta_{k}": round(new_state[k] - old_state[k], 6) for k in emo_fields}
+        delta_report = {
+            f"delta_{k}": round(new_state[k] - old_state[k], 6) for k in emo_fields
+        }
         return delta_report
 
     def calculate_emotional_tension(self) -> float:
@@ -236,6 +548,7 @@ class CharacterPhaseSpace:
     def to_dict(self) -> Dict[str, float]:
         return {k: round(getattr(self, k), 4) for k in self._get_all_emotion_fields()}
 
+
 # =============================================================================
 # 多因果动态网络系统
 # 支持多父多子、因果传导、分叉合并、伏笔追踪
@@ -249,6 +562,7 @@ class ImplicitAssumption:
     story_logic_check: str = ""  # 新增：故事逻辑校验结果
     audit_trace: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
 
+
 @dataclass
 class CausalNode:
     """
@@ -258,6 +572,7 @@ class CausalNode:
     - 支持伏笔标记与自动回收
     - 支持多节点合并触发
     """
+
     node_id: str
     character: str
     raw_narrative: str
@@ -267,9 +582,11 @@ class CausalNode:
     emotional_impulse: Dict[str, float] = field(default_factory=dict)
     spatial_mutually_exclusive_tag: Optional[str] = None
     parent_nodes: List[str] = field(default_factory=list)  # 多父节点
-    child_nodes: List[str] = field(default_factory=list)   # 多子节点
+    child_nodes: List[str] = field(default_factory=list)  # 多子节点
     causal_conductivity: float = 0.8  # 因果传导系数：父节点势能传导比例
-    merge_required: List[str] = field(default_factory=list)  # 需要哪些父节点全部完成才触发
+    merge_required: List[str] = field(
+        default_factory=list
+    )  # 需要哪些父节点全部完成才触发
 
     implicit_assumptions: List[ImplicitAssumption] = field(default_factory=list)
     story_element_type: StoryElementType = StoryElementType.ACTION
@@ -284,7 +601,9 @@ class CausalNode:
     audit_report: Optional[Dict[str, Any]] = None
     risk_summary: Dict[str, Any] = field(default_factory=dict)
 
-    def calculate_causal_potential(self, registry: Dict[str, CharacterPhaseSpace]) -> float:
+    def calculate_causal_potential(
+        self, registry: Dict[str, CharacterPhaseSpace]
+    ) -> float:
         """
         多因果势能计算：
         基础情感驱动力 + 父节点传导势能 + 伏笔权重 + 张力加成
@@ -306,7 +625,7 @@ class CausalNode:
         )
 
         # 2. 克制力非线性抑制
-        inhibition = 1.0 - (space.restraint ** 1.5)
+        inhibition = 1.0 - (space.restraint**1.5)
         base_pot = drive * inhibition + 0.3
 
         # 3. 父节点传导势能
@@ -317,16 +636,19 @@ class CausalNode:
         tension_bonus = space.calculate_emotional_tension() * 0.5
 
         # 6. 风险扣减
-        critical_count = sum(1 for a in self.implicit_assumptions if a.risk_level == RiskLevel.CRITICAL)
+        critical_count = sum(
+            1 for a in self.implicit_assumptions if a.risk_level == RiskLevel.CRITICAL
+        )
         risk_factor = max(0.5, 1.0 - critical_count * 0.15)
 
         final_pot = round(
             (base_pot + parent_bonus + foreshadow_bonus + tension_bonus) * risk_factor,
-            6
+            6,
         )
         self.causal_potential = max(0.01, final_pot)
         self.emotional_tension = space.calculate_emotional_tension()
         return self.causal_potential
+
 
 # =============================================================================
 # 章节图 & 全局状态
@@ -344,14 +666,17 @@ class ChapterGraph:
     spl_stage_records: List[Dict[str, Any]] = field(default_factory=list)
     story_quality_score: float = 0.0
 
+
 @dataclass
 class WorldLine:
     """✨ 新增：多世界线管理"""
+
     worldline_id: str
     name: str
     divergence_point: str  # 分叉节点ID
     nodes: Dict[str, CausalNode] = field(default_factory=dict)
     is_active: bool = True
+
 
 @dataclass
 class GlobalCausalState:
@@ -369,7 +694,9 @@ class GlobalCausalState:
     worldlines: Dict[str, WorldLine] = field(default_factory=dict)
     global_tension_curve: List[float] = field(default_factory=list)  # 全书张力曲线
 
-    def add_character(self, name: str, profile: Dict[str, Any], phase: CharacterPhaseSpace) -> None:
+    def add_character(
+        self, name: str, profile: Dict[str, Any], phase: CharacterPhaseSpace
+    ) -> None:
         self.characters_profile[name] = profile
         self.emotional_registry[name] = phase
 
@@ -379,6 +706,9 @@ class GlobalCausalState:
 
     def save_snapshot(self) -> None:
         snap = dataclasses.asdict(self)
+        # asdict 将 CausalNode 转为 dict，回滚时无法直接还原；
+        # 额外保留 pending_foreshadows 的深拷贝以供 rollback 使用
+        snap["_pending_foreshadows_deep"] = copy.deepcopy(self.pending_foreshadows)
         self.history_snapshots.append(snap)
         if len(self.history_snapshots) > 30:
             self.history_snapshots.pop(0)
@@ -388,27 +718,40 @@ class GlobalCausalState:
             return False
         snap = self.history_snapshots[idx]
         self.characters_profile = snap["characters_profile"]
-        self.emotional_registry = {k: CharacterPhaseSpace(**v) for k, v in snap["emotional_registry"].items()}
+        self.emotional_registry = {
+            k: CharacterPhaseSpace(**v) for k, v in snap["emotional_registry"].items()
+        }
         self.world_rules = snap["world_rules"]
         self.established_facts = set(snap["established_facts"])
         self.fact_lock = set(snap["fact_lock"])
-        self.global_risk_pool = {k: RiskLevel[v] for k, v in snap["global_risk_pool"].items()}
+        # 恢复 pending_foreshadows：使用深拷贝保留 CausalNode 类型信息
+        self.pending_foreshadows = copy.deepcopy(
+            snap.get("_pending_foreshadows_deep", [])
+        )
+        self.global_risk_pool = {
+            k: RiskLevel[v] for k, v in snap["global_risk_pool"].items()
+        }
+        self.current_chapter = snap.get("current_chapter", self.current_chapter)
+        self.global_tension_curve = list(snap.get("global_tension_curve", []))
         self.version = snap["version"]
         return True
 
-    def emotional_contagion(self, source: str, target: str, strength: float = 0.3) -> None:
+    def emotional_contagion(
+        self, source: str, target: str, strength: float = 0.3
+    ) -> None:
         """✨ 新增：人际情感传染，A的情绪影响B"""
         source_space = self.emotional_registry.get(source)
         target_space = self.emotional_registry.get(target)
         if not source_space or not target_space:
             return
-        
+
         # 核心情绪传染
         for emo in ["anxiety", "desire", "guilt", "shame"]:
             source_val = getattr(source_space, emo)
             target_val = getattr(target_space, emo)
             delta = source_val * strength * 0.2
             setattr(target_space, emo, max(0.001, min(0.999, target_val + delta)))
+
 
 # =============================================================================
 # SPL 第一阶：叙事剥离（故事原生优化）
@@ -426,7 +769,7 @@ class NarrativeStripper:
             operation="STRIP_NARRATIVE",
             stage=self.stage,
             node_id=node_id,
-            remark=remark
+            remark=remark,
         )
         self.trace_logs.append(log)
 
@@ -456,23 +799,31 @@ class NarrativeStripper:
             node.story_element_type = self._classify_story_element(node)
             node.status = NodeStatus.STRIPPED
             node.spl_process_stage = self.stage
-            
+
             # 伏笔登记
             if node.is_foreshadow:
                 node.status = NodeStatus.FORESHADOW
                 self._add_log(node.node_id, "识别为伏笔节点，已登记待回收")
-            
+
             stripped_list.append(node)
-            self._add_log(node.node_id, f"叙事剥离完成，分类为{node.story_element_type.name}")
-        
+            self._add_log(
+                node.node_id, f"叙事剥离完成，分类为{node.story_element_type.name}"
+            )
+
         return stripped_list
+
 
 # =============================================================================
 # SPL 第二阶：内隐假设透视（故事原生优化）
 # 校验人物动机合理性、情节逻辑连贯性、伏笔有效性
 # =============================================================================
 class ImplicitAssumptionScanner:
-    def __init__(self, account: ResponsibilityAccount, world_rules: Dict[str, Any], sp_engine: Optional["SecondPerspectiveCausalEngine"] = None):
+    def __init__(
+        self,
+        account: ResponsibilityAccount,
+        world_rules: Dict[str, Any],
+        sp_engine: Optional["SecondPerspectiveCausalEngine"] = None,
+    ):
         self.account = account
         self.stage = SPLStage.SCAN_ASSUMPTION
         self.world_rules = world_rules
@@ -485,32 +836,36 @@ class ImplicitAssumptionScanner:
             operation="SCAN_ASSUMPTION",
             stage=self.stage,
             node_id=node_id,
-            remark=remark
+            remark=remark,
         )
         self.trace_logs.append(log)
 
-    def _check_character_motivation(self, node: CausalNode, space: CharacterPhaseSpace) -> Tuple[bool, str]:
+    def _check_character_motivation(
+        self, node: CausalNode, space: CharacterPhaseSpace
+    ) -> Tuple[bool, str]:
         """校验人物行为是否符合当前情感状态"""
         conclusion = node.conclusion
-        
+
         # 高克制角色不会做出冲动行为
         if space.restraint > 0.7:
             if any(k in conclusion for k in ("大喊", "追赶", "崩溃", "痛哭")):
                 return False, "高克制状态下做出冲动行为，动机不合理"
-        
+
         # 低依恋角色不会做出挽留行为
         if space.attachment < 0.3:
             if any(k in conclusion for k in ("挽留", "哀求", "道歉")):
                 return False, "低依恋状态下做出挽留行为，动机不合理"
-        
+
         # 高愧疚角色不会主动亲近
         if space.guilt > 0.7:
             if any(k in conclusion for k in ("拥抱", "亲吻", "表白")):
                 return False, "高愧疚状态下做出亲近行为，动机不合理"
-        
+
         return True, "动机合理"
 
-    def scan(self, nodes: List[CausalNode], emo_reg: Dict[str, CharacterPhaseSpace]) -> List[CausalNode]:
+    def scan(
+        self, nodes: List[CausalNode], emo_reg: Dict[str, CharacterPhaseSpace]
+    ) -> List[CausalNode]:
         if not self.account.bind_stage(self.stage):
             raise PermissionError(f"SPL阶段身份不匹配")
 
@@ -521,12 +876,15 @@ class ImplicitAssumptionScanner:
             conclusion = node.conclusion
 
             # 1. 时空场景假设
-            if any(k in premise + conclusion for k in ("车站", "站台", "电车", "街道", "房间")):
+            if any(
+                k in premise + conclusion
+                for k in ("车站", "站台", "电车", "街道", "房间")
+            ):
                 ass = ImplicitAssumption(
                     content="场景存在对应物理空间，时空场自洽",
                     confidence=0.99,
                     risk_level=RiskLevel.SAFE,
-                    source_node_id=node.node_id
+                    source_node_id=node.node_id,
                 )
                 node.implicit_assumptions.append(ass)
 
@@ -539,46 +897,68 @@ class ImplicitAssumptionScanner:
                     confidence=0.9 if valid else 0.5,
                     risk_level=risk,
                     source_node_id=node.node_id,
-                    story_logic_check=reason
+                    story_logic_check=reason,
                 )
                 node.implicit_assumptions.append(ass)
 
                 # 3. 情感行为假设
                 if char_space.restraint > 0.8:
-                    risk = RiskLevel.CRITICAL if char_space.anxiety > 0.7 else RiskLevel.WARNING
+                    risk = (
+                        RiskLevel.CRITICAL
+                        if char_space.anxiety > 0.7
+                        else RiskLevel.WARNING
+                    )
                     ass = ImplicitAssumption(
                         content=f"角色高克制状态下，仍具备情绪调控能力",
                         confidence=round(char_space.restraint, 2),
                         risk_level=risk,
-                        source_node_id=node.node_id
+                        source_node_id=node.node_id,
                     )
                     node.implicit_assumptions.append(ass)
 
             # 第二视角五步内核·第二步：内隐假设透视（逆反校验 + 崩溃评估）
             if self.sp_engine is not None:
-                ev = [{"id": node.node_id, "premise": node.premise, "conclusion": node.conclusion, "character": node.character}]
+                ev = [
+                    {
+                        "id": node.node_id,
+                        "premise": node.premise,
+                        "conclusion": node.conclusion,
+                        "character": node.character,
+                    }
+                ]
                 chain = self.sp_engine.narrative_stripping(ev)
                 self.sp_engine.implicit_assumption_probe(chain)
                 for a in chain[0].get("assumptions", []):
                     if a["collapse"] == "INEVITABLE":
-                        node.implicit_assumptions.append(ImplicitAssumption(
-                            content=f"第二视角逆反校验：{a['content']}（撤除则{a['reverse_check']}）",
-                            confidence=0.85,
-                            risk_level=RiskLevel.CRITICAL,
-                            source_node_id=node.node_id,
-                            story_logic_check="第二视角因果重构：关键预设不可逆撤除"
-                        ))
+                        node.implicit_assumptions.append(
+                            ImplicitAssumption(
+                                content=f"第二视角逆反校验：{a['content']}（撤除则{a['reverse_check']}）",
+                                confidence=0.85,
+                                risk_level=RiskLevel.CRITICAL,
+                                source_node_id=node.node_id,
+                                story_logic_check="第二视角因果重构：关键预设不可逆撤除",
+                            )
+                        )
 
             node.status = NodeStatus.AUDITED
-            self._add_log(node.node_id, f"完成逻辑校验，发现{len(node.implicit_assumptions)}条内隐假设")
+            self._add_log(
+                node.node_id,
+                f"完成逻辑校验，发现{len(node.implicit_assumptions)}条内隐假设",
+            )
         return nodes
+
 
 # =============================================================================
 # SPL 第三阶：脆弱性对冲（故事原生优化）
 # 识别OOC风险、逻辑漏洞、节奏问题、伏笔遗忘
 # =============================================================================
 class VulnerabilityHedge:
-    def __init__(self, account: ResponsibilityAccount, global_state: GlobalCausalState, sp_engine: Optional["SecondPerspectiveCausalEngine"] = None):
+    def __init__(
+        self,
+        account: ResponsibilityAccount,
+        global_state: GlobalCausalState,
+        sp_engine: Optional["SecondPerspectiveCausalEngine"] = None,
+    ):
         self.account = account
         self.stage = SPLStage.HEDGE_RISK
         self.global_state = global_state
@@ -592,7 +972,7 @@ class VulnerabilityHedge:
             operation="HEDGE_RISK",
             stage=self.stage,
             node_id=node_id,
-            remark=remark
+            remark=remark,
         )
         self.trace_logs.append(log)
 
@@ -607,7 +987,9 @@ class VulnerabilityHedge:
         # 检查待回收伏笔
         pending_foreshadows = self.global_state.pending_foreshadows
         if pending_foreshadows and len(pending_foreshadows) > 5:
-            self._add_log("GLOBAL", f"存在{len(pending_foreshadows)}个待回收伏笔，建议尽快回收")
+            self._add_log(
+                "GLOBAL", f"存在{len(pending_foreshadows)}个待回收伏笔，建议尽快回收"
+            )
 
         for node in nodes:
             node_risk = defaultdict(int)
@@ -617,7 +999,7 @@ class VulnerabilityHedge:
                     total_critical += 1
 
             node.risk_summary = dict(node_risk)
-            
+
             # OOC风险直接剔除
             if node_risk.get(RiskLevel.FATAL, 0) > 0:
                 node.status = NodeStatus.PRUNED
@@ -638,23 +1020,42 @@ class VulnerabilityHedge:
 
         # 第二视角五步内核·第三步：脆弱性对冲（崩塌必然判定，非概率）
         if self.sp_engine is not None:
-            events = [{"id": n.node_id, "premise": n.premise, "conclusion": n.conclusion, "character": n.character} for n in nodes]
-            hedge_report = self.sp_engine.vulnerability_hedge(self.sp_engine.narrative_stripping(events))
+            events = [
+                {
+                    "id": n.node_id,
+                    "premise": n.premise,
+                    "conclusion": n.conclusion,
+                    "character": n.character,
+                }
+                for n in nodes
+            ]
+            hedge_report = self.sp_engine.vulnerability_hedge(
+                self.sp_engine.narrative_stripping(events)
+            )
             verdict = hedge_report["collapse_verdict"]
             if verdict == "INEVITABLE_COLLAPSE":
-                self._add_log("GLOBAL", f"第二视角崩塌必然判定：{hedge_report['weakest_variable']} 缺失将导致因果链必然崩塌")
+                self._add_log(
+                    "GLOBAL",
+                    f"第二视角崩塌必然判定：{hedge_report['weakest_variable']} 缺失将导致因果链必然崩塌",
+                )
                 global_fuse = True
                 self.global_state.global_risk_pool["SP_COLLAPSE"] = RiskLevel.FATAL
             elif verdict == "CONDITIONAL_COLLAPSE":
-                self._add_log("GLOBAL", f"第二视角崩塌条件判定：{hedge_report['weakest_variable']} 缺失将条件性崩塌")
+                self._add_log(
+                    "GLOBAL",
+                    f"第二视角崩塌条件判定：{hedge_report['weakest_variable']} 缺失将条件性崩塌",
+                )
 
         return filtered_nodes, global_fuse
+
 
 # =============================================================================
 # 多因果拓扑仲裁器（支持合并触发、因果传导、多世界线）
 # =============================================================================
 class CausalIntersectionBroker:
-    def arbitrate_and_prune(self, nodes: List[CausalNode], registry: Dict[str, CharacterPhaseSpace]) -> List[CausalNode]:
+    def arbitrate_and_prune(
+        self, nodes: List[CausalNode], registry: Dict[str, CharacterPhaseSpace]
+    ) -> List[CausalNode]:
         # 1. 计算所有节点势能
         for n in nodes:
             n.calculate_causal_potential(registry)
@@ -674,7 +1075,9 @@ class CausalIntersectionBroker:
             for loser in group[1:]:
                 loser.status = NodeStatus.PRUNED
                 pruned_ids.add(loser.node_id)
-                print(f"✂️ 拓扑剪枝 | 互斥标记:{tag} | 保留:{winner.node_id} | 剔除:{loser.node_id}")
+                print(
+                    f"✂️ 拓扑剪枝 | 互斥标记:{tag} | 保留:{winner.node_id} | 剔除:{loser.node_id}"
+                )
 
         # 3. 合并节点校验：检查是否所有前置节点都已完成
         valid_nodes = []
@@ -683,13 +1086,17 @@ class CausalIntersectionBroker:
                 continue
             if n.merge_required:
                 # 检查是否所有合并前置节点都在有效列表中
-                all_merged = all(p in [x.node_id for x in nodes if x.node_id not in pruned_ids] for p in n.merge_required)
+                all_merged = all(
+                    p in [x.node_id for x in nodes if x.node_id not in pruned_ids]
+                    for p in n.merge_required
+                )
                 if not all_merged:
                     n.status = NodeStatus.MERGED
                     continue
             valid_nodes.append(n)
 
         return valid_nodes
+
 
 # =============================================================================
 # 认知审计引擎（故事原生质量评分）
@@ -701,16 +1108,18 @@ class CognitiveAuditEngine:
         if account.stage not in allowed_stages:
             raise ValueError("阶段身份校验失败")
 
-    def audit_phase_space_safety(self, registry: Dict[str, CharacterPhaseSpace]) -> Dict[str, Any]:
+    def audit_phase_space_safety(
+        self, registry: Dict[str, CharacterPhaseSpace]
+    ) -> Dict[str, Any]:
         issues, warns = [], []
         score = 100.0
         for name, sp in registry.items():
             tension = sp.calculate_emotional_tension()
             triggers = sp.check_threshold_triggers()
-            
+
             if triggers:
                 warns.append(f"[{name}] 情感阈值触发：{triggers}")
-            
+
             if (sp.restraint < 0.1 and sp.desire > 0.9) or sp.despair > 0.95:
                 issues.append(f"[{name}] 情感相点击穿极限")
                 score -= 25
@@ -723,17 +1132,22 @@ class CognitiveAuditEngine:
             "is_fatal": len(issues) > 0,
             "issues": issues,
             "warnings": warns,
-            "score": max(0.0, score)
+            "score": max(0.0, score),
         }
 
-    def audit_story_quality(self, chapter: ChapterGraph, nodes: List[CausalNode]) -> Dict[str, Any]:
+    def audit_story_quality(
+        self, chapter: ChapterGraph, nodes: List[CausalNode]
+    ) -> Dict[str, Any]:
         """✨ 新增：故事质量专项审计"""
         score = 100.0
         issues, warns = [], []
 
         # 节奏评分：张力曲线是否平滑
         if chapter.tension_curve:
-            tension_variance = sum((x - sum(chapter.tension_curve)/len(chapter.tension_curve))**2 for x in chapter.tension_curve)
+            tension_variance = sum(
+                (x - sum(chapter.tension_curve) / len(chapter.tension_curve)) ** 2
+                for x in chapter.tension_curve
+            )
             if tension_variance < 0.1:
                 warns.append("章节张力过于平缓，缺乏节奏变化")
                 score -= 15
@@ -759,8 +1173,9 @@ class CognitiveAuditEngine:
             "issues": issues,
             "warnings": warns,
             "element_count": len(element_types),
-            "foreshadow_count": foreshadow_count
+            "foreshadow_count": foreshadow_count,
         }
+
 
 # =============================================================================
 # 叙事渲染层（情感感知型渲染）
@@ -774,6 +1189,7 @@ class MockLLM(LLMProvider):
 
     def generate(self, prompt: str, **kwargs) -> str:
         return "（演示模式：未接入 LLM）角色的内心随事件推进自然转变，情节在此节点平滑演进。接入 DeepSeekProvider 或任意 LLMProvider 后可渲染出匹配当前情感张力与故事元素类型的真实文学文本。"
+
 
 class DeepSeekProvider(LLMProvider):
     def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com"):
@@ -790,15 +1206,22 @@ class DeepSeekProvider(LLMProvider):
             messages=[{"role": "user", "content": prompt}],
             temperature=kwargs.get("temperature", 0.4),
             max_tokens=kwargs.get("max_tokens", 1000),
-            stream=False
+            stream=False,
         )
         return resp.choices[0].message.content.strip()
+
 
 class StylisticScribe:
     def __init__(self, provider: Optional[LLMProvider] = None):
         self.provider = provider or MockLLM()
 
-    def render_node_to_text(self, node: CausalNode, snapshot: Dict[str, float], profile: Dict[str, Any], tension: float) -> str:
+    def render_node_to_text(
+        self,
+        node: CausalNode,
+        snapshot: Dict[str, float],
+        profile: Dict[str, Any],
+        tension: float,
+    ) -> str:
         """✨ 情感感知型渲染，根据张力自动调整文风"""
         prompt = f"""
 【SPL故事生成强制约束】
@@ -817,11 +1240,14 @@ class StylisticScribe:
 """
         return self.provider.generate(prompt)
 
+
 # =============================================================================
 # 主引擎：SPL故事生成引擎
 # =============================================================================
 class SPLStoryGenerationEngine:
-    def __init__(self, novel_title: str, init_state: Optional[GlobalCausalState] = None):
+    def __init__(
+        self, novel_title: str, init_state: Optional[GlobalCausalState] = None
+    ):
         self.novel_title = novel_title
         self.state = init_state or GlobalCausalState()
         self.chapters: List[ChapterGraph] = []
@@ -829,43 +1255,60 @@ class SPLStoryGenerationEngine:
         self.main_account = ResponsibilityAccount(
             organization="SPL-Story-Core",
             role="Story-Generation-Engine",
-            stage=SPLStage.LOCK_RESPONSIBILITY.name
+            stage=SPLStage.LOCK_RESPONSIBILITY.name,
         )
 
         self.sp_engine = SecondPerspectiveCausalEngine()
         self.stripper = NarrativeStripper(self.main_account)
-        self.scanner = ImplicitAssumptionScanner(self.main_account, self.state.world_rules, self.sp_engine)
+        self.scanner = ImplicitAssumptionScanner(
+            self.main_account, self.state.world_rules, self.sp_engine
+        )
         self.hedger = VulnerabilityHedge(self.main_account, self.state, self.sp_engine)
         self.broker = CausalIntersectionBroker()
-        self.auditor = CognitiveAuditEngine(self.main_account, [s.name for s in SPLStage])
+        self.auditor = CognitiveAuditEngine(
+            self.main_account, [s.name for s in SPLStage]
+        )
         self.scribe = StylisticScribe()
 
     def set_llm_provider(self, provider: LLMProvider):
         self.scribe.provider = provider
 
     def process_chapter(
-        self, 
-        chapter_id: int, 
-        title: str, 
+        self,
+        chapter_id: int,
+        title: str,
         raw_nodes: List[CausalNode],
         target_tension: float = 0.6,
-        auto_emotional_contagion: bool = True
+        auto_emotional_contagion: bool = True,
     ) -> ChapterGraph:
-        print(f"\n===== SPL故事生成启动 | 第{chapter_id}章《{title}》 | 目标张力：{target_tension} =====")
+        print(
+            f"\n===== SPL故事生成启动 | 第{chapter_id}章《{title}》 | 目标张力：{target_tension} ====="
+        )
         self.state.save_snapshot()
         self.state.current_chapter = chapter_id
-        chapter_graph = ChapterGraph(chapter_id=chapter_id, title=title, target_tension=target_tension)
+        chapter_graph = ChapterGraph(
+            chapter_id=chapter_id, title=title, target_tension=target_tension
+        )
 
         try:
             # 【SPL 1 叙事剥离】
             print("1/4 执行：叙事剥离 & 故事元素识别")
             stripped_nodes = self.stripper.strip(raw_nodes)
-            print(f"   识别到：{len([n for n in stripped_nodes if n.is_foreshadow])}个伏笔，{len(set(n.story_element_type for n in stripped_nodes))}种故事元素")
+            print(
+                f"   识别到：{len([n for n in stripped_nodes if n.is_foreshadow])}个伏笔，{len(set(n.story_element_type for n in stripped_nodes))}种故事元素"
+            )
 
             # 【SPL 2 内隐假设透视】
             print("2/4 执行：内隐假设透视 & 人物动机校验")
-            scanned_nodes = self.scanner.scan(stripped_nodes, self.state.emotional_registry)
-            ooc_count = sum(1 for n in scanned_nodes for a in n.implicit_assumptions if a.risk_level == RiskLevel.CRITICAL)
+            scanned_nodes = self.scanner.scan(
+                stripped_nodes, self.state.emotional_registry
+            )
+            ooc_count = sum(
+                1
+                for n in scanned_nodes
+                for a in n.implicit_assumptions
+                if a.risk_level == RiskLevel.CRITICAL
+            )
             print(f"   动机校验完成，发现{ooc_count}个潜在OOC风险")
 
             # 【SPL 3 脆弱性对冲】
@@ -876,10 +1319,14 @@ class SPLStoryGenerationEngine:
             print(f"   风险对冲完成，有效节点：{len(hedged_nodes)}个")
 
             # 多因果拓扑仲裁
-            valid_nodes = self.broker.arbitrate_and_prune(hedged_nodes, self.state.emotional_registry)
+            valid_nodes = self.broker.arbitrate_and_prune(
+                hedged_nodes, self.state.emotional_registry
+            )
 
             # 双层审计
-            rule_audit = self.auditor.audit_phase_space_safety(self.state.emotional_registry)
+            rule_audit = self.auditor.audit_phase_space_safety(
+                self.state.emotional_registry
+            )
             if rule_audit["is_fatal"]:
                 raise RuntimeError(f"情感稳态击穿：{rule_audit['issues']}")
             if rule_audit["warnings"]:
@@ -892,17 +1339,19 @@ class SPLStoryGenerationEngine:
 
             for i, node in enumerate(valid_nodes, 1):
                 char_sp = self.state.emotional_registry.get(node.character)
-                
+
                 # 情感传染（可选开启）
                 if auto_emotional_contagion and i > 1:
-                    prev_char = valid_nodes[i-2].character if i>1 else None
+                    prev_char = valid_nodes[i - 2].character if i > 1 else None
                     if prev_char and prev_char != node.character:
                         self.state.emotional_contagion(prev_char, node.character)
 
                 # 应用事件情感脉冲
                 delta_report = {}
                 if char_sp and node.emotional_impulse:
-                    delta_report = char_sp.apply_event_impulse(node.emotional_impulse, event_id=node.node_id)
+                    delta_report = char_sp.apply_event_impulse(
+                        node.emotional_impulse, event_id=node.node_id
+                    )
 
                 # 计算当前张力
                 tension = char_sp.calculate_emotional_tension() if char_sp else 0.5
@@ -925,25 +1374,39 @@ class SPLStoryGenerationEngine:
                 chapter_graph.nodes[node.node_id] = node
 
                 if delta_report:
-                    print(f"   [{i}/{len(valid_nodes)}] {node.character} 张力：{tension:.2f} | 情感变化：{delta_report}")
+                    print(
+                        f"   [{i}/{len(valid_nodes)}] {node.character} 张力：{tension:.2f} | 情感变化：{delta_report}"
+                    )
 
             # 【SPL 4 责任闭环：故事质量评分 + 第二视角责任锚定】
             quality_audit = self.auditor.audit_story_quality(chapter_graph, valid_nodes)
-            chapter_graph.actual_tension = sum(tension_curve)/len(tension_curve) if tension_curve else 0
-            sp_events = [{"id": n.node_id, "premise": n.premise, "conclusion": n.conclusion, "character": n.character} for n in valid_nodes]
+            chapter_graph.actual_tension = (
+                sum(tension_curve) / len(tension_curve) if tension_curve else 0
+            )
+            sp_events = [
+                {
+                    "id": n.node_id,
+                    "premise": n.premise,
+                    "conclusion": n.conclusion,
+                    "character": n.character,
+                }
+                for n in valid_nodes
+            ]
             sp_chain = self.sp_engine.narrative_stripping(sp_events)
             sp_anchors = self.sp_engine.responsibility_anchor(sp_chain)
             chapter_graph.audit_report = {
                 "emotion_audit": rule_audit,
                 "quality_audit": quality_audit,
-                "responsibility_anchors": sp_anchors
+                "responsibility_anchors": sp_anchors,
             }
 
             # 【SPL 5 因果重构：第二视角五步内核第五步】
             print("5/5 执行：第二视角因果重构（收敛校验至目标稳态）")
             self.sp_engine.implicit_assumption_probe(sp_chain)
             sp_hedge = self.sp_engine.vulnerability_hedge(sp_chain)
-            sp_recon = self.sp_engine.causal_reconstruction(sp_chain, fix_vars=[], target_state="逻辑自洽稳态")
+            sp_recon = self.sp_engine.causal_reconstruction(
+                sp_chain, fix_vars=[], target_state="逻辑自洽稳态"
+            )
             chapter_graph.audit_report["second_perspective"] = {
                 "collapse_verdict": sp_hedge["collapse_verdict"],
                 "weakest_variable": sp_hedge["weakest_variable"],
@@ -957,8 +1420,12 @@ class SPLStoryGenerationEngine:
             self.state.version += 1
             self.chapters.append(chapter_graph)
 
-            print(f"✅ 章节生成完成 | 实际张力：{chapter_graph.actual_tension:.2f} | 故事质量分：{quality_audit['score']:.0f}")
-            print(f"   全书平均张力：{sum(self.state.global_tension_curve)/len(self.state.global_tension_curve):.2f}")
+            print(
+                f"✅ 章节生成完成 | 实际张力：{chapter_graph.actual_tension:.2f} | 故事质量分：{quality_audit['score']:.0f}"
+            )
+            print(
+                f"   全书平均张力：{sum(self.state.global_tension_curve) / len(self.state.global_tension_curve):.2f}"
+            )
             return chapter_graph
 
         except Exception as e:
@@ -979,10 +1446,11 @@ class SPLStoryGenerationEngine:
         data = {
             "title": self.novel_title,
             "global_state": dataclasses.asdict(self.state),
-            "chapters": [dataclasses.asdict(c) for c in self.chapters]
+            "chapters": [dataclasses.asdict(c) for c in self.chapters],
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2, default=_json_default)
+
 
 # =============================================================================
 # 第二视角因果推理引擎 V2.1（决定论内核，无概率化推测）
@@ -992,7 +1460,18 @@ class SPLStoryGenerationEngine:
 class SecondPerspectiveCausalEngine:
     """决定论因果推理：仅做因果链的结构性判定，不输出概率估计。"""
 
-    _COLOCATION_HINTS = ["车站", "站台", "电车", "街道", "房间", "同处", "见面", "相遇", "战场", "广场"]
+    _COLOCATION_HINTS = [
+        "车站",
+        "站台",
+        "电车",
+        "街道",
+        "房间",
+        "同处",
+        "见面",
+        "相遇",
+        "战场",
+        "广场",
+    ]
     _MOTION_HINTS = ["追", "跑", "走", "离开", "去", "赶到", "赶来", "冲", "奔"]
     _COMMS_HINTS = ["发消息", "打电话", "拉黑", "联系", "回复", "微信", "短信", "传讯"]
     _JUMP_HINTS = ["突然", "莫名", "毫无理由", "不知怎么", "鬼使神差", "突然之间"]
@@ -1010,7 +1489,12 @@ class SecondPerspectiveCausalEngine:
             premise, conclusion = ev.get("premise", ""), ev.get("conclusion", "")
             char = ev["character"] or self._infer_character(premise + conclusion)
             ev["character"] = char
-            dangling = bool(char) and (i > 0) and (char not in premise) and (char not in seen_chars)
+            dangling = (
+                bool(char)
+                and (i > 0)
+                and (char not in premise)
+                and (char not in seen_chars)
+            )
             if char:
                 seen_chars.add(char)
             ev["dangling"] = dangling
@@ -1023,17 +1507,27 @@ class SecondPerspectiveCausalEngine:
             text = ev.get("premise", "") + ev.get("conclusion", "")
             assumptions = []
             if any(h in text for h in self._COLOCATION_HINTS):
-                assumptions.append({
-                    "content": "角色共处同一物理时空，场景自洽",
-                    "reverse_check": "撤除：角色不在同一时空 → 位移类行为失去前提",
-                    "collapse": "INEVITABLE" if any(m in ev.get("conclusion", "") for m in self._MOTION_HINTS) else "STABLE",
-                })
+                assumptions.append(
+                    {
+                        "content": "角色共处同一物理时空，场景自洽",
+                        "reverse_check": "撤除：角色不在同一时空 → 位移类行为失去前提",
+                        "collapse": "INEVITABLE"
+                        if any(
+                            m in ev.get("conclusion", "") for m in self._MOTION_HINTS
+                        )
+                        else "STABLE",
+                    }
+                )
             if any(h in text for h in self._COMMS_HINTS):
-                assumptions.append({
-                    "content": "角色间存在生效的通讯连接手段",
-                    "reverse_check": "撤除：无通讯手段 → 通讯类行为不成立",
-                    "collapse": "INEVITABLE" if any(h in ev.get("conclusion", "") for h in self._COMMS_HINTS) else "STABLE",
-                })
+                assumptions.append(
+                    {
+                        "content": "角色间存在生效的通讯连接手段",
+                        "reverse_check": "撤除：无通讯手段 → 通讯类行为不成立",
+                        "collapse": "INEVITABLE"
+                        if any(h in ev.get("conclusion", "") for h in self._COMMS_HINTS)
+                        else "STABLE",
+                    }
+                )
             ev["assumptions"] = assumptions
         return chain
 
@@ -1041,7 +1535,9 @@ class SecondPerspectiveCausalEngine:
     def vulnerability_hedge(self, chain):
         weakest, weakest_score = None, -1.0
         for ev in chain:
-            frag = sum(1 for a in ev.get("assumptions", []) if a["collapse"] == "INEVITABLE")
+            frag = sum(
+                1 for a in ev.get("assumptions", []) if a["collapse"] == "INEVITABLE"
+            )
             if ev.get("dangling"):
                 frag += 2
             ev["fragility"] = frag
@@ -1059,7 +1555,9 @@ class SecondPerspectiveCausalEngine:
             "weakest_variable": weakest["id"] if weakest else None,
             "weakest_event": weakest,
             "collapse_verdict": verdict,
-            "chain_fragility": [{"id": e["id"], "fragility": e.get("fragility", 0)} for e in chain],
+            "chain_fragility": [
+                {"id": e["id"], "fragility": e.get("fragility", 0)} for e in chain
+            ],
         }
 
     # —— 第四步：责任闭环锚定（最小决策单元 / 责任节点）——
@@ -1068,23 +1566,27 @@ class SecondPerspectiveCausalEngine:
         for idx, ev in enumerate(chain):
             char = ev.get("character", "")
             action = self._extract_action(ev.get("conclusion", ""))
-            anchors.append({
-                "event_id": ev["id"],
-                "position": idx,
-                "accountable": char,
-                "decision_unit": f"{char}→{action}" if char else action,
-                "premise": ev.get("premise", ""),
-                "conclusion": ev.get("conclusion", ""),
-            })
+            anchors.append(
+                {
+                    "event_id": ev["id"],
+                    "position": idx,
+                    "accountable": char,
+                    "decision_unit": f"{char}→{action}" if char else action,
+                    "premise": ev.get("premise", ""),
+                    "conclusion": ev.get("conclusion", ""),
+                }
+            )
         return anchors
 
     # —— 第五步：因果重构（注入修正变量，校验收敛至目标稳态）——
     def causal_reconstruction(self, chain, fix_vars, target_state):
         fixed_ids = set()
         for ev in chain:
-            for fix in (fix_vars or []):
+            for fix in fix_vars or []:
                 if ev["id"] == fix.get("target_id") or fix.get("apply_to") == "all":
-                    ev["premise"] = (ev["premise"] + "；" + fix.get("adds_premise", "")).strip("；")
+                    ev["premise"] = (
+                        ev["premise"] + "；" + fix.get("adds_premise", "")
+                    ).strip("；")
                     ev["dangling"] = False
                     fixed_ids.add(ev["id"])
         residual = []
@@ -1095,15 +1597,23 @@ class SecondPerspectiveCausalEngine:
                 if a["collapse"] == "INEVITABLE" and not fix_vars:
                     residual.append(f"事件{ev['id']}关键预设不可逆撤除")
         if residual:
-            return {"converged": False, "diagnosis": "[中断：因果链未收敛] " + "；".join(residual), "fixed_ids": list(fixed_ids)}
-        return {"converged": True, "target_state": target_state,
-                "diagnosis": f"因果链收敛至目标稳态：{target_state}", "fixed_ids": list(fixed_ids)}
+            return {
+                "converged": False,
+                "diagnosis": "[中断：因果链未收敛] " + "；".join(residual),
+                "fixed_ids": list(fixed_ids),
+            }
+        return {
+            "converged": True,
+            "target_state": target_state,
+            "diagnosis": f"因果链收敛至目标稳态：{target_state}",
+            "fixed_ids": list(fixed_ids),
+        }
 
     # —— 内部工具 ——
     def _infer_character(self, text):
-        """兜底角色推断：当事件未显式声明 character 时，提取首个 2-3 字中文名候选。"""
-        m = re.search(r"([\u4e00-\u9fa5]{2,3})", text)
-        return m.group(1) if m else ""
+        """兜底角色推断：仅接受可信人名候选；场景/天气/动词短语（如「下雨了」）不再被误认为角色名。"""
+        return _extract_plausible_name(text)
+
     def _extract_action(self, conclusion):
         for w in self._MOTION_HINTS + self._COMMS_HINTS:
             if w in conclusion:
@@ -1116,6 +1626,9 @@ class SecondPerspectiveCausalEngine:
 # =============================================================================
 if __name__ == "__main__":
     import sys
+
+    for conflict in check_engine_isolation():
+        print(f"⚠️ {conflict}")
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
@@ -1140,8 +1653,8 @@ if __name__ == "__main__":
             anxiety=0.3,
             guilt=0.1,
             desire=0.4,
-            shame=0.2
-        )
+            shame=0.2,
+        ),
     )
 
     # 角色 B：温和坚定型
@@ -1155,8 +1668,8 @@ if __name__ == "__main__":
             anxiety=0.4,
             guilt=0.2,
             desire=0.3,
-            shame=0.1
-        )
+            shame=0.1,
+        ),
     )
 
     # 启动 SPL 故事引擎
@@ -1170,7 +1683,7 @@ if __name__ == "__main__":
         raw_narrative="方案评审会上，林夏与周舟对技术路线产生分歧",
         premise="林夏坚持采用自研方案，周舟主张引入成熟方案",
         conclusion="林夏摆出数据，坚持己见，情绪开始紧绷",
-        emotional_impulse={"anxiety": 0.15, "restraint": -0.05}
+        emotional_impulse={"anxiety": 0.15, "restraint": -0.05},
     )
 
     node2 = CausalNode(
@@ -1179,7 +1692,7 @@ if __name__ == "__main__":
         raw_narrative="周舟察觉林夏的紧绷，放缓语气",
         premise="周舟注意到林夏语速加快、态度强硬",
         conclusion="他没有反驳，只是重新梳理了两套方案的利弊",
-        emotional_impulse={"attachment": 0.1, "restraint": 0.05}
+        emotional_impulse={"attachment": 0.1, "restraint": 0.05},
     )
 
     node3 = CausalNode(
@@ -1188,17 +1701,17 @@ if __name__ == "__main__":
         raw_narrative="林夏意识到自己的固执，态度软化",
         premise="林夏听完周舟的梳理，发现自己忽略了成本因素",
         conclusion="她沉默片刻，同意纳入第三方评审再定",
-        emotional_impulse={"anxiety": -0.2, "guilt": 0.1, "attachment": 0.1}
+        emotional_impulse={"anxiety": -0.2, "guilt": 0.1, "attachment": 0.1},
     )
 
     engine.process_chapter(
         chapter_id=1,
         title="分歧与选择",
         raw_nodes=[node1, node2, node3],
-        target_tension=0.5
+        target_tension=0.5,
     )
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("SPL 叙事一致性审计 · 通用演示")
-    print("="*60)
+    print("=" * 60)
     print(engine.compile_all())
