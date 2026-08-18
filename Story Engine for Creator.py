@@ -13,22 +13,43 @@ from collections import defaultdict
 # 在两个引擎中实现完全一致，可安全共享。
 _ENGINE_FINGERPRINT = "creator"
 
+# —— 全局引擎注册表 ——
+# module_from_spec 方式加载（见 README load() 示例）不会自动注册进 sys.modules，
+# 这里把指纹登记到 sys.modules 的保留键，使 check_engine_isolation 对任何加载方式都有效。
+import sys as _sys
+_SYS_REG_KEY = "__story_engine_fingerprints__"
+_loaded = _sys.modules.get(_SYS_REG_KEY)
+if not isinstance(_loaded, dict):
+    _loaded = {}
+    _sys.modules[_SYS_REG_KEY] = _loaded
+_loaded.setdefault(__name__, _ENGINE_FINGERPRINT)
+
 
 def check_engine_isolation() -> List[str]:
     """检测当前进程是否同时加载了 Creator 与 Business 两个引擎，返回冲突描述列表（空 = 安全）。"""
     import sys
 
     conflicts: List[str] = []
+    other_engines: List[str] = []
+    # 1) 全局注册表（覆盖 module_from_spec 手动加载的场景）
+    reg = sys.modules.get(_SYS_REG_KEY)
+    if isinstance(reg, dict):
+        for mod_name, fp in reg.items():
+            if mod_name != __name__ and fp != _ENGINE_FINGERPRINT and mod_name not in other_engines:
+                other_engines.append(mod_name)
+    # 2) sys.modules 中已注册的引擎模块（覆盖正常 import 的场景）
     for mod_name, mod in list(sys.modules.items()):
-        if mod is None or mod_name == __name__:
+        if mod is None or mod_name == __name__ or mod_name == _SYS_REG_KEY:
             continue
         fp = getattr(mod, "_ENGINE_FINGERPRINT", None)
-        if fp is not None and fp != _ENGINE_FINGERPRINT:
-            conflicts.append(
-                f"检测到 Business 引擎（模块 {mod_name!r}）与 Creator 引擎同时加载："
-                "两者同名数据类（CausalNode 等）字段不兼容，混用会导致数据错乱、程序崩溃。"
-                "请勿在同一进程混用两个引擎；唯一可安全共享的是 SecondPerspectiveCausalEngine。"
-            )
+        if fp is not None and fp != _ENGINE_FINGERPRINT and mod_name not in other_engines:
+            other_engines.append(mod_name)
+    if other_engines:
+        conflicts.append(
+            f"检测到 Business 引擎（模块 {other_engines!r}）与 Creator 引擎同时加载："
+            "两者同名数据类（CausalNode 等）字段不兼容，混用会导致数据错乱、程序崩溃。"
+            "请勿在同一进程混用两个引擎；唯一可安全共享的是 SecondPerspectiveCausalEngine。"
+        )
     return conflicts
 
 
@@ -621,12 +642,13 @@ _NAME_FULL_NOISE = (
 )
 # 名字候选后允许紧跟的内容（动作/虚词/标点），防止把「林夏意识到」吞成「林夏意」
 _NAME_FOLLOW_RE = re.compile(
-    r"([\u4e00-\u9fa5]{2,3})(?=(?:意识到|觉得|认为|坚持|决定|同意|梳理|评估|分析|理解|"
+    r"([\u4e00-\u9fa5]{2,3}?)(?=(?:意识到|觉得|认为|坚持|决定|同意|梳理|评估|分析|理解|"
     r"发现|感到|知道|说道|离开|来到|回到|前往|看着|听见|想起|点头|摇头|沉默|开口|"
     r"转身|回头|抬头|低头|坐下|起身|推开|关上|拿起|放下|掏出|停下|愣住|怔住|惊醒|"
     r"醒来|出门|进屋|盘坐|走入|走进|站在|望着|听着|打量|伸手|握住|松开|深吸|叹息|"
     r"皱眉|轻笑|沉声|低声|高声|忽然|终于|缓缓|慢慢|渐渐|随即|径直|直接|继续|说|道|"
-    r"问|喊|答|在|了|着|过|的|地|得|和|与|跟|，|。|；|！|？|：|,|;|!|\\?|:|$))"
+    r"问|喊|答|在|了|着|过|的|地|得|和|与|跟|闭关|修炼|炼化|突破|渡劫|入定|出关|"
+    r"运功|施法|掐诀|御剑|下山|云游|历练|顿悟|参悟|凝练|淬炼|召见|议事|禀报|，|。|；|！|？|：|,|;|!|\?|:))"
 )
 
 
@@ -770,6 +792,122 @@ def parse_outline_to_nodes(outline: str) -> List[CausalNode]:
     return nodes
 
 
+# =============================================================================
+# CharacterProfiler：角色档案自动提取（候选，不臆造）
+# 从文本自动推断每角色的【语域画像 register_hints】与【已知知识 knowledge】候选。
+# 诚实原则：自动产物一律标记为 candidate，需作者确认后才生效；
+#            forbidden_knowledge（角色不该知道的事）本质是创作意图，默认由作者填写。
+# =============================================================================
+
+# 语域推断时排除的通用词（出现频率高但不构成角色腔调）
+_REGISTRY_STOPWORDS = {
+    "一个", "这个", "那个", "什么", "怎么", "自己", "我们", "你们", "他们",
+    "没有", "不是", "就是", "知道", "觉得", "说道", "时候", "现在", "已经",
+    "如果", "然后", "但是", "因为", "所以", "可以", "这样", "那样", "还有",
+    "真的", "可能", "应该", "非常", "一直", "终于", "突然", "最后", "开始",
+    "有点", "有些", "一下", "起来", "出来", "过来", "进去", "回来", "只是",
+}
+
+# knowledge 候选提取：句中明确“说出”的信息实体（名词性短语）
+_KNOWLEDGE_ENTITY_RE = re.compile(
+    r"(?:封印|禁地|宝藏|秘笈|秘籍|阵法|丹药|功法|宗门|家族|计划|阴谋|真相|秘密|"
+    r"身份|身世|往事|线索|卷宗|地图|钥匙|信物|令牌|消息|情报|地点|名单|证据)"
+)
+
+
+def _split_dialogue_blocks(text: str) -> List[Dict[str, str]]:
+    """粗粒度切分台词块：提取 [说话人, 台词] 对（说话人取台词前最近的角色名）。"""
+    blocks: List[Dict[str, str]] = []
+    for re_pat in _DIALOGUE_RES:
+        for m in re_pat.finditer(text):
+            d = m.group(1).strip()
+            if not d:
+                continue
+            window = text[max(0, m.start() - 60) : m.start()]
+            # 说话者模式「XX说/道/问/喊」：取 window 内【最后一个】匹配（最靠近台词）；
+            # 名字限 2-3 字，兼容「又说/也道/低声问」等副词/状语
+            sp = None
+            for sm in re.finditer(
+                r"([\u4e00-\u9fa5]{2,3})(?:又|也|再|便|就|却|连忙|低声|大声|冷笑)?[说说道问喊答]",
+                window,
+            ):
+                sp = sm
+            speaker = sp.group(1) if sp else ""
+            if not speaker:
+                # 兜底：窗口内最近的角色名（排除动作词）
+                cands = re.findall(r"[\u4e00-\u9fa5]{2,4}", window)
+                if cands:
+                    speaker = cands[-1]
+            blocks.append({"speaker": speaker, "dialogue": d})
+    return blocks
+
+
+def extract_character_profiles(text: str) -> Dict[str, Dict[str, Any]]:
+    """从正文文本提取角色档案候选。
+
+    返回 {角色名: {"register_hints_candidates": [...], "knowledge_candidates": [...]}}
+    不写入全局状态，由调用方决定是否确认。
+    """
+    blocks = _split_dialogue_blocks(text)
+    if not blocks:
+        return {}
+    # 说话人统计 + 台词收集
+    speaker_dialogues: Dict[str, List[str]] = {}
+    for b in blocks:
+        if b["speaker"]:
+            speaker_dialogues.setdefault(b["speaker"], []).append(b["dialogue"])
+    # 全部台词词频（用于识别“他人专属词”候选时过滤通用词）
+    from collections import Counter
+
+    all_word_counter: Counter = Counter()
+    for dl in speaker_dialogues.values():
+        for d in dl:
+            pure = re.sub(r"[^\u4e00-\u9fa5]", "", d)
+            for i in range(len(pure) - 1):
+                all_word_counter[pure[i : i + 2]] += 1
+    profiles: Dict[str, Dict[str, Any]] = {}
+    for speaker, dls in speaker_dialogues.items():
+        per = Counter()
+        for d in dls:
+            pure = re.sub(r"[^\u4e00-\u9fa5]", "", d)
+            for i in range(len(pure) - 1):
+                per[pure[i : i + 2]] += 1
+        # 语域候选：台词内的 2 字滑动窗口（重叠式，不丢边界：老朽/禁地/碰不得 都能命中）；
+        # 过滤停用词与全局高频词；高频专属词（该角色独有的 3-4 字短语）单独补充
+        hints = []
+        seen_hint = set()
+        for d in dls:
+            pure = re.sub(r"[^\u4e00-\u9fa5]", "", d)
+            for i in range(len(pure) - 1):
+                w = pure[i : i + 2]
+                if w in _REGISTRY_STOPWORDS or w in seen_hint:
+                    continue
+                if all_word_counter[w] > 1:
+                    continue
+                seen_hint.add(w)
+                hints.append(w)
+        # 补充：高频但非全局高频的词（出现>=2次且只此角色说）
+        for w, cnt in per.most_common(60):
+            if w in seen_hint or w in _REGISTRY_STOPWORDS:
+                continue
+            if cnt >= 2 and all_word_counter[w] == cnt:
+                seen_hint.add(w)
+                hints.append(w)
+        # knowledge 候选：台词中出现的实体词
+        knowledge = []
+        for d in dls:
+            for m in _KNOWLEDGE_ENTITY_RE.finditer(d):
+                # 取实体词前后最多4字上下文作为“已知信息”候选
+                ctx = d[max(0, m.start() - 4) : m.end() + 4]
+                if ctx not in knowledge:
+                    knowledge.append(ctx)
+        profiles[speaker] = {
+            "register_hints_candidates": hints[:12],
+            "knowledge_candidates": knowledge[:12],
+        }
+    return profiles
+
+
 # ==================== 主引擎（已优化）====================
 class UltimateCausalNovelEngine:
     def __init__(
@@ -796,6 +934,9 @@ class UltimateCausalNovelEngine:
         self.sp_engine = SecondPerspectiveCausalEngine()
         self.world_builder = WorldBuilder()
         self.style_recognizer = StyleRecognizer()
+        self.presentation_auditor = NarrativePresentationAuditor(
+            self.global_state.world_rules
+        )
 
     def set_llm_provider(self, provider: LLMProvider) -> None:
         self.llm_provider = provider
@@ -1102,6 +1243,10 @@ class UltimateCausalNovelEngine:
             return None
         lang = (self.output_language or "zh").lower().strip()
         issue_text = "\n".join(issues)
+        style_hint = self._style_instruction()
+        style_block = (
+            f"\n文体风格约束（必须严格遵守）：\n{style_hint}\n" if style_hint else ""
+        )
         if lang in ("en", "english"):
             prompt = f"""You are a top-tier plot-logic architect.
 Characters: {self.global_state.characters}
@@ -1117,6 +1262,7 @@ Output 120-200 English words."""
 上一次生成未通过逻辑审计，具体问题如下：
 {issue_text}
 请重写以消除上述问题，保持人物性格与情节连贯，严禁生硬转折词。
+{style_block}
 输出150-250字的小说文本。"""
         try:
             return self.llm_provider.generate(prompt, temperature=0.6, max_tokens=8000)
@@ -1136,6 +1282,12 @@ Output 120-200 English words."""
                 if emotions
                 else ""
             )
+            style_hint = self._style_instruction()
+            style_block = (
+                f"\n文体风格约束（必须严格遵守）：\n{style_hint}\n"
+                if style_hint
+                else ""
+            )
             if lang in ("en", "english"):
                 prompt = f"""You are a top-tier web fiction writer.
 Characters: {self.global_state.characters}
@@ -1146,7 +1298,7 @@ Output: 120-200 English words."""
             elif lang in ("bilingual", "zh-en", "zh_en", "cn-en", "cn_en", "mix"):
                 prompt = f"""你是一名优秀的网络小说作家，同时也是专业英译者。
 角色设定：{self.global_state.characters}
-{emotion_hint}
+{emotion_hint}{style_block}
 请将情节起点【{node.premise}】自然演进至故事走向【{node.conclusion}】。
 要求：文字细腻流畅，符合人物性格，行为必须有合理动机，严禁使用“突然”“莫名其妙”等生硬转折词。
 输出格式必须严格如下：
@@ -1158,7 +1310,7 @@ Output: 120-200 English words."""
             else:
                 prompt = f"""你是一名优秀的网络小说作家。
 角色设定：{self.global_state.characters}
-{emotion_hint}
+{emotion_hint}{style_block}
 请将情节起点【{node.premise}】自然演进至故事走向【{node.conclusion}】。
 要求：文字细腻流畅，符合人物性格，行为必须有合理动机，严禁使用“突然”“莫名其妙”等生硬转折词。
 输出150-250字的小说文本。"""
@@ -1184,6 +1336,12 @@ Output: 120-200 English words."""
             emotion_hint = (
                 f"重点体现{', '.join(emotions)}的变化过程。" if emotions else ""
             )
+            style_hint = self._style_instruction()
+            style_block = (
+                f"\n文体风格约束（必须严格遵守）：\n{style_hint}\n"
+                if style_hint
+                else ""
+            )
             if lang in ("en", "english"):
                 prompt = f"""You are a master of narrative continuity.
 There is a natural gap: previous ending [{prev_node.conclusion}], next opening [{curr_node.premise}].
@@ -1194,7 +1352,7 @@ Avoid abrupt words like "suddenly", "out of nowhere". Do NOT repeat previous con
                 prompt = f"""你是顶级小说情节逻辑架构师，同时也是专业英译者。
 作者大纲存在自然断层：上一段结尾【{prev_node.conclusion}】，下一段开头【{curr_node.premise}】。
 请写一段过渡剧情，通过心理活动、情绪变化或环境细节将两个场景无缝连接。
-{emotion_hint}
+{emotion_hint}{style_block}
 严禁使用生硬转折词，不要重复前文内容，让过渡自然流畅。
 输出格式必须严格如下：
 【中文】
@@ -1206,7 +1364,7 @@ Avoid abrupt words like "suddenly", "out of nowhere". Do NOT repeat previous con
                 prompt = f"""你是顶级小说情节逻辑架构师。
 作者大纲存在自然断层：上一段结尾【{prev_node.conclusion}】，下一段开头【{curr_node.premise}】。
 请写一段200字左右的过渡剧情，通过心理活动、情绪变化或环境细节将两个场景无缝连接。
-{emotion_hint}
+{emotion_hint}{style_block}
 严禁使用生硬转折词，不要重复前文内容，让过渡自然流畅。"""
             return self.llm_provider.generate(prompt, temperature=0.7, max_tokens=8000)
         return self._call_llm_for_node(curr_node, chapter)
@@ -1245,6 +1403,191 @@ Avoid abrupt words like "suddenly", "out of nowhere". Do NOT repeat previous con
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(self.report_generator.generate(self.novel_title, self.chapters))
         return full
+
+    # ==================== 修复通道（Review→Repair 闭环） ====================
+    def repair_presentation_issues(
+        self,
+        text: str,
+        issues: List[str],
+        outline: str = "",
+        characters: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """对四审计发现的呈现层问题做修复：
+
+        - 有 LLM：整段重写（注入全部叙事约束，消除问题）；
+        - 无 LLM（规则降级）：按问题类型做文本替换（删解说腔词 / 删现代词台词 / 删动机归因句）。
+        返回 {"rewritten": bool, "new_text": str, "diff": [...], "actions": [...]}；
+        actions 为逐条修复动作（供作者逐条接受/拒绝）。
+        """
+        actions: List[Dict[str, Any]] = []
+        new_text = text
+        lang = (self.output_language or "zh").lower().strip()
+
+        if self.llm_provider is not None:
+            issue_text = "\n".join(issues) if issues else "未发现具体问题，请整体提升叙事质量"
+            style_hint = self._style_instruction()
+            style_block = (
+                f"\n文体风格约束（必须严格遵守）：\n{style_hint}\n"
+                if style_hint
+                else ""
+            )
+            if lang in ("en", "english"):
+                prompt = f"""You are a master editor for web fiction.
+Rewrite the passage below to fix these narration issues:
+{issue_text}
+Rules: chronicler perspective (no omniscient narration, no motive explanation, record only visible actions and heard words); dialogues must fit era, knowledge, and register.
+{style_block}
+Passage:
+{text}
+Output the revised passage only."""
+            else:
+                prompt = f"""你是一名资深网文编辑。
+请重写下面的段落，修复以下叙事呈现问题：
+{issue_text}
+要求：
+1. 史官旁观视角——只记可见行动、可闻话语，不替角色解释内心动机；
+2. 禁止全知解说腔（殊不知/原来/事实上等向读者讲设定的句子）；
+3. 台词符合时代、符合角色认知边界、符合角色语域；
+4. 保持人物性格、情节与原有信息量不变。
+{style_block}
+原文：
+{text}
+只输出重写后的正文。"""
+            try:
+                resp = self.llm_provider.generate(
+                    prompt, temperature=0.6, max_tokens=8000
+                )
+                if resp and resp.strip():
+                    actions.append(
+                        {
+                            "type": "llm_rewrite",
+                            "target": "整段",
+                            "accepted": None,  # 待作者确认
+                        }
+                    )
+                    return {
+                        "rewritten": True,
+                        "new_text": resp.strip(),
+                        "diff": [("REWRITE", text[:40] + "…", resp.strip()[:40] + "…")],
+                        "actions": actions,
+                    }
+            except Exception:
+                pass  # 降级到规则修复
+
+        # —— 规则降级修复（无 LLM 或 LLM 失败）——
+        # 1) 删全知解说腔词
+        for w in _OMNISCIENT_PATTERNS:
+            if w in new_text:
+                new_text = new_text.replace(w, "")
+                actions.append({"type": "remove_omniscient", "target": w, "accepted": None})
+        # 2) 删动机归因句（他之所以…是因为… / 她内心真正…是…）
+        for pat in _EXPLAIN_MOTIVE_PATTERNS:
+            m = pat.search(new_text)
+            if m:
+                seg = m.group(0)
+                new_text = new_text.replace(seg, "")
+                actions.append({"type": "remove_motive_explanation", "target": seg[:20], "accepted": None})
+        # 3) 台词时代穿越：整句台词替换为省略号（保留对话结构，抹掉现代词；现代题材豁免）
+        wr = self.global_state.world_rules or {}
+        sp = wr.get("style_profile") or {}
+        genre = sp.get("genre") if isinstance(sp, dict) else ""
+        modern_setting = bool(wr.get("modern_setting")) or genre in {"都市", "科幻", "现代", "悬疑", "末世", "游戏", "星际", "赛博"}
+        forbidden = [] if modern_setting else list(_ERA_FORBIDDEN_DEFAULT)
+        if isinstance(wr.get("era_forbidden_words"), list):
+            forbidden.extend(wr["era_forbidden_words"])
+        for d in _extract_dialogues(new_text):
+            if any(w in d for w in forbidden):
+                new_text = new_text.replace(d, "……")
+                actions.append({"type": "mask_dialogue", "target": d[:24], "accepted": None})
+        # 4) 语域漂移：命中他人专属词的台词，抹掉该词（保留句子）
+        if characters:
+            registry_map = {}
+            for name, prof in characters.items():
+                prof = prof or {}
+                hints = prof.get("register_hints")
+                if isinstance(hints, list) and hints:
+                    registry_map[name] = hints
+            word_owner = {}
+            for owner, hints in registry_map.items():
+                for w in hints:
+                    if w and w not in word_owner:
+                        word_owner[w] = owner
+            for d in _extract_dialogues(new_text):
+                pos = new_text.find(d)
+                if pos < 0:
+                    continue
+                window = new_text[max(0, pos - 60) : pos]
+                speaker = None
+                last_pos = -1
+                for name in characters:
+                    p = window.rfind(name)
+                    if p > last_pos:
+                        speaker, last_pos = name, p
+                if not speaker:
+                    continue
+                for w, owner in word_owner.items():
+                    if w in d and owner != speaker:
+                        new_text = new_text.replace(w, "")
+                        actions.append({"type": "remove_registry_leak", "target": w, "accepted": None})
+        changed = new_text != text
+        return {
+            "rewritten": changed,
+            "new_text": new_text,
+            "diff": [("EDIT", text[:40] + "…", new_text[:40] + "…")] if changed else [],
+            "actions": actions,
+        }
+
+    # ==================== 推演模式（Simulate） ====================
+    def simulate_chapter(
+        self,
+        outline: str,
+        chapter_title: str = "",
+        characters: Optional[Dict[str, Any]] = None,
+        max_rewrites: int = 2,
+    ) -> Dict[str, Any]:
+        """推演模式：大纲 → 成文（带全套叙事约束）→ 自动过审 → 不达标重写（≤max_rewrites 次）。
+
+        返回 {"chapter": Chapter|None, "text": str, "audit": dict, "rewrite_count": int, "passed": bool}
+        """
+        if characters is not None:
+            # 推演前注入作者确认的角色档案（含 register_hints / knowledge / forbidden_knowledge）
+            self.global_state.characters.update(characters)
+        if not chapter_title:
+            chapter_title = "推演章节"
+        # 用现有生成管线成文：先 plan（大纲→节点+规划审计），再 render（节点扩写+审计）
+        ch = self.create_chapter_from_outline(1, chapter_title, outline)
+        if ch is None:
+            return {"chapter": None, "text": "", "audit": None, "rewrite_count": 0, "passed": False}
+        rendered = self.render_chapter(ch)
+        text = rendered if isinstance(rendered, str) else (ch.content or "")
+        # 自动过审
+        audit = self.audit_text(
+            text, outline=outline, characters=self.global_state.characters
+        )
+        rewrite_count = 0
+        # 不达标且有 LLM → 修复重写，最多 max_rewrites 次
+        while not audit["all_passed"] and self.llm_provider is not None and rewrite_count < max_rewrites:
+            issues = []
+            pres = audit["presentation"]
+            for k in ("narration_perspective", "dialogue_era", "dialogue_cognition", "dialogue_registry"):
+                issues += pres.get(k, {}).get("issues", [])
+            repair = self.repair_presentation_issues(
+                text, issues, outline=outline, characters=self.global_state.characters
+            )
+            if not repair["rewritten"]:
+                break
+            text = repair["new_text"]
+            rewrite_count += 1
+            audit = self.audit_text(
+                text, outline=outline, characters=self.global_state.characters
+            )
+        return {
+            "chapter": ch,
+            "text": text,
+            "audit": audit,
+            "rewrite_count": rewrite_count,
+            "passed": bool(audit["all_passed"]),
+        }
 
     # 新增辅助方法：从自然语言大纲直接创建章节
     def create_chapter_from_outline(
@@ -1295,6 +1638,102 @@ Avoid abrupt words like "suddenly", "out of nowhere". Do NOT repeat previous con
             profile["scope"] = "segment"
         self.global_state.world_rules["style_profile"] = profile
         return profile
+
+    def _style_instruction(self) -> str:
+        """从世界规则中的风格档案生成生成期文体约束；未识别风格时返回空串（调用方优雅降级）。"""
+        profile = (self.global_state.world_rules or {}).get("style_profile") or {}
+        return StyleRecognizer.style_guidelines(profile)
+
+    # ==================== 角色档案自动提取 ====================
+    def extract_character_profiles(
+        self, text: str
+    ) -> Dict[str, Dict[str, Any]]:
+        """从正文提取角色档案候选（register_hints / knowledge），不写入全局状态。"""
+        return extract_character_profiles(text)
+
+    # ==================== 审稿模式（Review）公共入口 ====================
+    def audit_text(
+        self,
+        text: str,
+        outline: str = "",
+        characters: Optional[Dict[str, Any]] = None,
+        narration_mode: Optional[str] = None,
+        include_causal: bool = True,
+    ) -> Dict[str, Any]:
+        """对已有文本/大纲做三层审计，输出完整报告。
+
+        层1 因果层（五步算子）：对大纲事件链做脆弱性/责任/收敛判定
+        层2 叙事呈现层（四审计）：史官旁观 / 台词时代 / 台词认知 / 台词语域
+        层3 逻辑一致性（已有插件）：逻辑跳跃 / 前提-结论匹配（对文本拆句触发）
+
+        参数：
+          text: 待审文本（正文或大纲）
+          outline: 可选，因果链来源（优先于从 text 拆解）
+          characters: 角色档案（knowledge/forbidden_knowledge/register_hints）
+          narration_mode: 叙事立场覆盖；None 时按 outline 关键词推断
+          include_causal: 是否跑五步算子因果层
+        返回：结构化报告（含 all_passed 汇总）。
+        """
+        char_map = characters or self.global_state.characters
+        # —— 层2 叙事呈现层（对正文文本）——
+        presentation = self.presentation_auditor.audit(
+            text=text,
+            characters=char_map or None,
+            narration_mode=narration_mode,
+            outline=outline,
+        )
+        # —— 层1 因果层（五步算子，对大纲/事件链）——
+        causal = None
+        if include_causal:
+            src = outline or text
+            events = parse_outline_to_nodes(src)
+            chain = self.sp_engine.narrative_stripping(
+                [
+                    {
+                        "id": n.node_id,
+                        "premise": n.premise,
+                        "conclusion": n.conclusion,
+                        "character": n.character,
+                    }
+                    for n in events
+                ]
+            )
+            self.sp_engine.implicit_assumption_probe(chain)
+            sp_hedge = self.sp_engine.vulnerability_hedge(chain)
+            sp_anchor = self.sp_engine.responsibility_anchor(chain)
+            sp_recon = self.sp_engine.causal_reconstruction(
+                chain, fix_vars=[], target_state="叙事逻辑自洽"
+            )
+            sp_deep = self.sp_engine.deep_diagnose(chain, self.world_builder.world_rules)
+            causal = {
+                "chain": chain,
+                "collapse_verdict": sp_hedge["collapse_verdict"],
+                "weakest_variable": sp_hedge["weakest_variable"],
+                "anchors": sp_anchor,
+                "reconstruction": sp_recon,
+                "deep": sp_deep,
+            }
+        # —— 层3 逻辑一致性（文本拆句触发节点审计）——
+        logical = None
+        if text:
+            logical = self.node_auditor.audit(
+                {"text": text, "global_state": asdict(self.global_state)}
+            )
+        # —— 汇总 ——
+        pres_passed = self.presentation_auditor.all_passed(
+            {"presentation": presentation}
+        )
+        causal_passed = (
+            causal is None
+            or (causal["collapse_verdict"] == "STABLE" and causal["reconstruction"]["converged"])
+        )
+        logical_passed = logical is None or bool(logical.get("overall_passed"))
+        return {
+            "presentation": presentation,
+            "causal": causal,
+            "logical": logical,
+            "all_passed": pres_passed and causal_passed and logical_passed,
+        }
 
 
 # =============================================================================
@@ -1480,6 +1919,317 @@ class SecondPerspectiveCausalEngine:
             if w in conclusion:
                 return w
         return conclusion[:12]
+
+
+# =============================================================================
+# 叙事呈现层审计（移植自 story-engine-chrome-v2.0.0 engine.js）
+# 总纲：旁观历史视角——叙述者如史官，只记看见的行动、听见的话，不替角色解释内心；
+#      禁全知——不跳出叙事向读者讲设定（防解说腔）；台词审计——时代/认知/语域三层。
+# 提供：四审计 + 叙事立场推断（chronicler/limited/omniscient）
+# =============================================================================
+
+# 叙事立场关键词推断
+_NARRATION_CHRONICLER_KW = [
+    "悬疑", "推理", "侦探", "探案", "刑侦", "罪案", "命案", "凶案", "调查", "审讯", "证词",
+    "档案", "卷宗", "正史", "传记", "纪事", "实录", "编年", "口述", "笔录",
+]
+_NARRATION_LIMITED_KW = ["回忆录", "自传", "成长", "蜕变", "囚徒", "流放", "第一人称", "日记", "书信体"]
+_NARRATION_OMNISCIENT_KW = [
+    "史诗", "神话", "演义", "传奇", "传说", "评书", "说书", "话本", "唱本",
+    "民间故事", "寓言", "童话", "志怪", "神魔",
+]
+
+# 全知解说腔 / 动机归因模式
+_OMNISCIENT_PATTERNS = [
+    "殊不知", "原来", "事实上", "实际上", "其实他", "其实她", "要知道", "说白了",
+    "说到底", "换句话说", "众所周知", "值得注意的是",
+    "其深层原因", "背后真正的原因是", "不为人知的是", "读者应当知道",
+]
+_EXPLAIN_MOTIVE_PATTERNS = [
+    re.compile(r"他之所以[^，。；]*?是因为"),
+    re.compile(r"她之所以[^，。；]*?是因为"),
+    re.compile(r"他内心真正[^，。；]*?是"),
+    re.compile(r"她内心真正[^，。；]*?是"),
+    re.compile(r"[^，。；]{0,6}做这一切，?是因为"),
+    re.compile(r"[^，。；]{0,6}做这一切，?源于"),
+    re.compile(r"他这么做\s*是\s*因为"),
+    re.compile(r"她这么做\s*是\s*因为"),
+]
+# 允许的有限心理描写词（史官视角下可保留，不算动机归因）
+_ALLOWED_PSYCH = ["心想", "感到", "觉得", "意识到", "明白", "恍然", "暗自"]
+# 台词时代默认禁用词（现代词，可经 world_rules.era_forbidden_words 扩展）
+# 仅保留“时代错位感极强”的词：古风/仙侠/西幻文里出现会瞬间出戏；
+# 商业/都市/科幻题材经 modern_setting 豁免，作者可显式补充 era_forbidden_words 强制生效。
+_ERA_FORBIDDEN_DEFAULT = [
+    "系统", "手机", "电话", "网络", "数据", "系统提示", "心理素质", "效率低", "标准化",
+    "资源整合", "竞争力", "供应链", "互联网", "智能设备", "APP", "公众号",
+    "刷屏", "流量", "直播间", "外卖", "共享单车", "充电宝",
+]
+
+# 台词提取（支持三种引号）
+_DIALOGUE_RES = [
+    re.compile(r"“([^”]{1,120})”"),
+    re.compile(r"「([^」]{1,120})」"),
+    re.compile(r'"([^"]{1,120})"'),
+]
+
+
+def infer_narration_mode(outline: str) -> Optional[str]:
+    """从大纲关键词推断叙事立场；平手或零命中返回 None。"""
+    if not outline:
+        return None
+    scores = {
+        "chronicler": sum(1 for w in _NARRATION_CHRONICLER_KW if w in outline),
+        "limited": sum(1 for w in _NARRATION_LIMITED_KW if w in outline),
+        "omniscient": sum(1 for w in _NARRATION_OMNISCIENT_KW if w in outline),
+    }
+    best = max(scores, key=scores.get)
+    winners = [k for k in scores if scores[k] == scores[best]]
+    return best if (len(winners) == 1 and scores[best] > 0) else None
+
+
+def _extract_dialogues(text: str) -> List[str]:
+    if not text:
+        return []
+    out: List[str] = []
+    for re_pat in _DIALOGUE_RES:
+        for m in re_pat.finditer(text):
+            d = (m.group(1) or "").strip()
+            if d:
+                out.append(d)
+    return out
+
+
+def audit_narration_perspective(
+    text: str, narration_mode: Optional[str]
+) -> Dict[str, Any]:
+    """史官旁观 / 禁全知（narration_mode 三档）。"""
+    mode = narration_mode or "chronicler"
+    if mode == "omniscient":
+        return {
+            "passed": True,
+            "score": 100,
+            "issues": [],
+            "allowed_psych_hits": [],
+            "note": "全知叙事模式：跳过史官视角检查",
+        }
+    issues: List[str] = []
+    if mode == "chronicler":
+        for w in _OMNISCIENT_PATTERNS:
+            if w in text:
+                issues.append(f"全知解说腔：出现'{w}'（叙述者跳出视角向读者讲设定）")
+    for pat in _EXPLAIN_MOTIVE_PATTERNS:
+        m = pat.search(text)
+        if m:
+            issues.append(f"动机归因：'{m.group(0)[:20]}…'（史官视角禁替角色解释内心）")
+    psych_hits = [w for w in _ALLOWED_PSYCH if w in text]
+    score = max(0, 100 - len(issues) * 25)
+    return {
+        "passed": len(issues) == 0,
+        "score": score,
+        "issues": issues,
+        "allowed_psych_hits": psych_hits,
+        "note": "叙事立场=" + mode + "：禁止动机归因"
+        + ("；禁止全知解说" if mode == "chronicler" else "；放宽全知解说"),
+    }
+
+
+def audit_dialogue_era(
+    text: str, world_rules: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """台词时代（现代词黑名单 + world_rules.era_forbidden_words 扩展）。
+
+    题材感知：若 world_rules 声明了现代/都市/科幻题材（style_profile.genre 或
+    world_rules.modern_setting=True），默认黑名单整体豁免（现代词在此类题材中合法）；
+    作者显式配置的 era_forbidden_words 仍强制生效。
+    """
+    dialogues = _extract_dialogues(text)
+    if not dialogues:
+        return {"passed": True, "score": 100, "issues": [], "note": "无台词，跳过时代审计"}
+    wr = world_rules or {}
+    # 题材豁免判断
+    modern_genres = {"都市", "科幻", "现代", "悬疑", "末世", "游戏", "星际", "赛博"}
+    genre = ""
+    sp = wr.get("style_profile") or {}
+    if isinstance(sp, dict):
+        genre = sp.get("genre") or ""
+    modern_setting = bool(wr.get("modern_setting")) or genre in modern_genres
+    forbidden = [] if modern_setting else list(_ERA_FORBIDDEN_DEFAULT)
+    if isinstance(wr.get("era_forbidden_words"), list):
+        forbidden.extend(wr["era_forbidden_words"])
+    if not forbidden:
+        return {
+            "passed": True,
+            "score": 100,
+            "issues": [],
+            "note": "现代题材：默认黑名单豁免",
+            "modern_setting": modern_setting,
+        }
+    issues: List[str] = []
+    for d in dialogues:
+        for w in forbidden:
+            if w in d:
+                issues.append(f"台词时代穿越：台词「{d[:24]}…」出现现代词'{w}'")
+                break
+    score = max(0, 100 - len(issues) * 15)
+    return {
+        "passed": len(issues) == 0,
+        "score": score,
+        "issues": issues,
+        "dialogues_checked": len(dialogues),
+        "modern_setting": modern_setting,
+    }
+
+
+def audit_dialogue_cognition(
+    text: str,
+    characters: Optional[Dict[str, Any]],
+    events: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """台词认知（角色只说己知之事；forbidden_knowledge / knowledge）。"""
+    dialogues = _extract_dialogues(text)
+    if not dialogues:
+        return {"passed": True, "score": 100, "issues": [], "note": "无台词，跳过认知审计"}
+    issues: List[str] = []
+    chars = set()
+    if events:
+        for ev in events:
+            if ev.get("character"):
+                chars.add(ev["character"])
+    chars.update((characters or {}).keys())
+    # 仅当角色名确实出现在文本中才纳入说话人候选
+    chars = {c for c in chars if c and c in text}
+    for d in dialogues:
+        d_pos = text.find(d)
+        if d_pos < 0:
+            continue
+        window = text[max(0, d_pos - 60) : d_pos]
+        speaker = None
+        last_pos = -1
+        for name in chars:
+            p = window.rfind(name)
+            if p > last_pos:
+                speaker, last_pos = name, p
+        if not speaker:
+            continue
+        profile = (characters or {}).get(speaker, {}) or {}
+        fk = profile.get("forbidden_knowledge")
+        if isinstance(fk, list):
+            for item in fk:
+                if item and item in d:
+                    issues.append(
+                        f"认知越界：{speaker} 说出不可知信息'{item}'（台词：{d[:24]}…）"
+                    )
+        knowledge = profile.get("knowledge")
+        if isinstance(knowledge, list) and re.search(
+            r"[一二三四五六七八九十0-9]+[阶境级位]|秘密|真实身份|隐藏身份", d
+        ):
+            known_facts = " ".join(knowledge)
+            for m in re.finditer(r"[\u4e00-\u9fa5]{2,4}[阶境级位]", d):
+                if m.group(0) not in known_facts:
+                    issues.append(
+                        f"认知越界：{speaker} 说出'{m.group(0)}'（不在其已知知识清单）"
+                    )
+                    break
+    score = max(0, 100 - len(issues) * 20)
+    return {
+        "passed": len(issues) == 0,
+        "score": score,
+        "issues": issues,
+        "speakers_matched": len(chars),
+    }
+
+
+def audit_dialogue_registry(
+    text: str, characters: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """台词语域分层（register_hints 专属词；命中他人专属词 → 语域漂移）。"""
+    dialogues = _extract_dialogues(text)
+    if not dialogues:
+        return {"passed": True, "score": 100, "issues": [], "note": "无台词，跳过语域审计"}
+    registry_map = {}
+    for name, prof in (characters or {}).items():
+        prof = prof or {}
+        hints = prof.get("register_hints")
+        if isinstance(hints, list) and hints:
+            registry_map[name] = hints
+    if not registry_map:
+        return {
+            "passed": True,
+            "score": 100,
+            "issues": [],
+            "note": "未配置角色语域画像，跳过语域审计",
+        }
+    word_owner = {}
+    for owner, hints in registry_map.items():
+        for w in hints:
+            if w and w not in word_owner:
+                word_owner[w] = owner
+    issues: List[str] = []
+    for d in dialogues:
+        pos = text.find(d)
+        if pos < 0:
+            continue
+        window = text[max(0, pos - 60) : pos]
+        speaker = None
+        last_pos = -1
+        for name in (characters or {}):
+            p = window.rfind(name)
+            if p > last_pos:
+                speaker, last_pos = name, p
+        if not speaker:
+            continue
+        for w, owner in word_owner.items():
+            if w in d and owner != speaker:
+                issues.append(
+                    f"语域漂移：{speaker} 使用了 {owner} 的专属用语'{w}'（台词：{d[:24]}…）"
+                )
+    score = max(0, 100 - len(issues) * 20)
+    return {
+        "passed": len(issues) == 0,
+        "score": score,
+        "issues": issues,
+        "registry_profiles": list(registry_map.keys()),
+    }
+
+
+class NarrativePresentationAuditor:
+    """叙事呈现层审计门面：四审计 + 立场推断，供审稿/推演复用。"""
+
+    def __init__(self, world_rules: Optional[Dict[str, Any]] = None):
+        self.world_rules = world_rules or {}
+
+    def infer_mode(self, outline: str) -> Optional[str]:
+        return infer_narration_mode(outline)
+
+    def audit(
+        self,
+        text: str,
+        characters: Optional[Dict[str, Any]] = None,
+        narration_mode: Optional[str] = None,
+        events: Optional[List[Dict[str, Any]]] = None,
+        outline: str = "",
+    ) -> Dict[str, Any]:
+        mode = narration_mode or self.infer_mode(outline) or "chronicler"
+        return {
+            "narration_mode": mode,
+            "narration_perspective": audit_narration_perspective(text, mode),
+            "dialogue_era": audit_dialogue_era(text, self.world_rules),
+            "dialogue_cognition": audit_dialogue_cognition(text, characters, events),
+            "dialogue_registry": audit_dialogue_registry(text, characters),
+        }
+
+    def all_passed(self, result: Dict[str, Any]) -> bool:
+        pres = result.get("presentation", result)
+        return all(
+            pres.get(k, {}).get("passed", True)
+            for k in (
+                "narration_perspective",
+                "dialogue_era",
+                "dialogue_cognition",
+                "dialogue_registry",
+            )
+        )
 
 
 # =============================================================================
@@ -1950,6 +2700,67 @@ class StyleRecognizer:
             main["genre"] = combined["genre"] if combined["genre"] else main["genre"]
             main["genre_source"] = "combined"
         return main
+
+    # —— 风格翻译层：把五维识别结果变成 LLM 可执行的生成约束（多文体适配）——
+    _GENRE_GUIDE = {
+        "修仙": "营造仙侠意境：修炼、灵根、渡劫、宗门体系等设定自然出现；对话可带古朴气，但以流畅为主；写景多用山泽灵雾、洞府丹炉意象。",
+        "玄幻": "突出热血与成长：斗气/武魂/血脉等体系设定铺陈有层次；战斗场面节奏明快、气势足；避免日常琐碎过度展开。",
+        "科幻": "保持科学逻辑与未来感：技术细节克制、可信；不出现超自然解释；环境描写强调机械/星际/数据质感；硬科幻世界观下技术设定优先。",
+        "悬疑": "营造悬念与压迫感：信息逐步释放，不可一次性全知；细节埋线，呼应前文线索；句式偏短促，留白多；禁止旁白剧透。",
+        "历史": "贴合时代语感：朝堂/征战/市井风俗描写有考据感；称谓、器物、制度符合时代背景；行文沉稳，少用现代词汇。",
+        "都市": "贴近现代生活质感：场景真实（职场/街道/住所）；心理描写细腻；语言自然口语化，节奏贴近日常；允许现代器物与用语。",
+        "奇幻": "营造异世界氛围：魔法、种族、王国设定细节丰富；地名/称谓有异域感；写景多城堡森林与神秘传说气息。",
+        "武侠": "突出侠气与招式美感：江湖恩怨、门派情义；打斗写意有招名；语言简练有力，可带文言腔但不拗口。",
+        "军事": "保持纪律与真实感：战术、编队、装备描写专业可信；叙事克制硬朗；节奏紧、短句多；禁儿女情长拖戏。",
+        "末世": "营造废土生存压迫感：物资、危机、幸存者心态写实；气氛阴郁但留希望；节奏快、冲突密；禁轻浮调侃。",
+    }
+
+    _PERSON_GUIDE = {
+        "第一人称": "全程使用“我”视角叙述，只写主角所见、所闻、所感；不得切换到其他角色内心。",
+        "第三人称": "使用“他/她/他们”叙述；视角可在角色间切换，但切换要自然，不突兀。",
+    }
+
+    _PERSPECTIVE_GUIDE = {
+        "全知": "允许作者视角俯瞰全局，可适当交代背景与人物内心，但不得破坏悬念。",
+        "限知": "严格跟随当前视角角色，只呈现其能看到、听到、猜到、感受到的信息；不得泄露角色未知之事。",
+        "中性旁观": "以旁观者视角记录可见行动与可闻对话，不进入任何角色内心，不做主观评价。",
+    }
+
+    _LANGUAGE_GUIDE = {
+        "文言": "通篇采用文言句式，用词典雅，虚字自然；篇幅可适度精简。",
+        "古风": "采用古朴文雅的白话，适当融入文言词汇与四字句，读来有古韵但易懂。",
+        "现代": "使用现代口语化表达，自然流畅，贴近当代读者阅读习惯。",
+        "中性": "语言平实自然，不刻意文白，以清晰叙事为先。",
+    }
+
+    _PACE_GUIDE = {
+        "快": "节奏紧凑，短句为主，信息密度高，减少环境铺陈与心理独白。",
+        "中": "节奏平稳，长短句结合，叙事、描写、对话均衡。",
+        "慢": "节奏舒缓，细节与心理描写丰富，环境氛围充分渲染，不急推进。",
+    }
+
+    @classmethod
+    def style_guidelines(cls, profile: Dict[str, Any]) -> str:
+        """把五维风格档案翻译为生成期约束文本。无档案/未知维度时优雅降级，不输出空壳约束。"""
+        if not profile:
+            return ""
+        parts = []
+        genre = profile.get("genre")
+        if genre and genre in cls._GENRE_GUIDE:
+            parts.append(f"【题材·{genre}】{cls._GENRE_GUIDE[genre]}")
+        person = profile.get("person")
+        if person in cls._PERSON_GUIDE:
+            parts.append(f"【人称】{cls._PERSON_GUIDE[person]}")
+        perspective = profile.get("perspective")
+        if perspective in cls._PERSPECTIVE_GUIDE:
+            parts.append(f"【视角】{cls._PERSPECTIVE_GUIDE[perspective]}")
+        language = profile.get("language")
+        if language in cls._LANGUAGE_GUIDE:
+            parts.append(f"【语言】{cls._LANGUAGE_GUIDE[language]}")
+        pace = profile.get("pace")
+        if pace in cls._PACE_GUIDE:
+            parts.append(f"【节奏】{cls._PACE_GUIDE[pace]}")
+        return "\n".join(parts)
 
 
 # ==================== 演示示例（题材中性） ====================

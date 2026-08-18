@@ -21,22 +21,43 @@ from enum import Enum, auto
 # 在两个引擎中实现完全一致，可安全共享。
 _ENGINE_FINGERPRINT = "business"
 
+# —— 全局引擎注册表 ——
+# module_from_spec 方式加载（见 README load() 示例）不会自动注册进 sys.modules，
+# 这里把指纹登记到 sys.modules 的保留键，使 check_engine_isolation 对任何加载方式都有效。
+import sys as _sys
+_SYS_REG_KEY = "__story_engine_fingerprints__"
+_loaded = _sys.modules.get(_SYS_REG_KEY)
+if not isinstance(_loaded, dict):
+    _loaded = {}
+    _sys.modules[_SYS_REG_KEY] = _loaded
+_loaded.setdefault(__name__, _ENGINE_FINGERPRINT)
+
 
 def check_engine_isolation() -> List[str]:
     """检测当前进程是否同时加载了 Creator 与 Business 两个引擎，返回冲突描述列表（空 = 安全）。"""
     import sys
 
     conflicts: List[str] = []
+    other_engines: List[str] = []
+    # 1) 全局注册表（覆盖 module_from_spec 手动加载的场景）
+    reg = sys.modules.get(_SYS_REG_KEY)
+    if isinstance(reg, dict):
+        for mod_name, fp in reg.items():
+            if mod_name != __name__ and fp != _ENGINE_FINGERPRINT and mod_name not in other_engines:
+                other_engines.append(mod_name)
+    # 2) sys.modules 中已注册的引擎模块（覆盖正常 import 的场景）
     for mod_name, mod in list(sys.modules.items()):
-        if mod is None or mod_name == __name__:
+        if mod is None or mod_name == __name__ or mod_name == _SYS_REG_KEY:
             continue
         fp = getattr(mod, "_ENGINE_FINGERPRINT", None)
-        if fp is not None and fp != _ENGINE_FINGERPRINT:
-            conflicts.append(
-                f"检测到 Creator 引擎（模块 {mod_name!r}）与 Business 引擎同时加载："
-                "两者同名数据类（CausalNode 等）字段不兼容，混用会导致数据错乱、程序崩溃。"
-                "请勿在同一进程混用两个引擎；唯一可安全共享的是 SecondPerspectiveCausalEngine。"
-            )
+        if fp is not None and fp != _ENGINE_FINGERPRINT and mod_name not in other_engines:
+            other_engines.append(mod_name)
+    if other_engines:
+        conflicts.append(
+            f"检测到 Creator 引擎（模块 {other_engines!r}）与 Business 引擎同时加载："
+            "两者同名数据类（CausalNode 等）字段不兼容，混用会导致数据错乱、程序崩溃。"
+            "请勿在同一进程混用两个引擎；唯一可安全共享的是 SecondPerspectiveCausalEngine。"
+        )
     return conflicts
 
 
@@ -245,7 +266,7 @@ _NAME_FULL_NOISE = (
     "彼此",
 )
 _NAME_FOLLOW_RE = re.compile(
-    r"([\u4e00-\u9fa5]{2,3})(?=(?:意识到|觉得|认为|坚持|决定|同意|梳理|评估|分析|理解|"
+    r"([\u4e00-\u9fa5]{2,3}?)(?=(?:意识到|觉得|认为|坚持|决定|同意|梳理|评估|分析|理解|"
     r"发现|感到|知道|说道|离开|来到|回到|前往|看着|听见|想起|点头|摇头|沉默|开口|"
     r"转身|回头|抬头|低头|坐下|起身|推开|关上|拿起|放下|掏出|停下|愣住|怔住|惊醒|"
     r"醒来|出门|进屋|盘坐|走入|走进|站在|望着|听着|打量|伸手|握住|松开|深吸|叹息|"

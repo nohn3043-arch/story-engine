@@ -53,7 +53,7 @@ STORY-ENGINE 对长篇叙事进行一致性审计，将编辑直觉转化为可�
   - `CognitiveAuditEngine` + 可插拔 `AuditPlugin` + `EmotionalConstraint`——可组合审计维度。
   - `CausalNode` 携带 `implicit_assumptions` 与 `vulnerability_score`——追踪 *因为 → 所以* 逻辑并量化脆弱性。
   - `NarrativeStripper` / `ImplicitAssumptionDetector` / `VulnerabilityAssessor`——第二视角算子流水线。
-  - `AutomaticRepairEngine` / `UltimateCausalNovelEngine` / `SecondPerspectiveCausalEngine` / `WorldBuilder`——修复、全书审计与世界观构建层。
+  - `AutomaticRepairEngine`（全量跳跃词修复）/ `UltimateCausalNovelEngine` / `SecondPerspectiveCausalEngine` / `WorldBuilder`（分词级世界观提取）——修复、全书审计与世界观构建层。
 - **业务引擎**（`engine for business.py`）——SPL 四阶段原生推理流水线：
   1. `STRIP_NARRATIVE`——识别叙事元素（伏笔 / 转折 / 高潮 / 铺垫）。
   2. `SCAN_ASSUMPTION`——`ImplicitAssumptionScanner` 校验动机与剧情逻辑。
@@ -63,6 +63,12 @@ STORY-ENGINE 对长篇叙事进行一致性审计，将编辑直觉转化为可�
   - `SPLStoryGenerationEngine` + `StylisticScribe` 驱动生成；`DeepSeekProvider` / `MockLLM` 为可替换 LLM 后端。
 
 两层共享与第二视角引擎相同的认知审计内核——这是将审计纪律应用于叙事，而非决策。
+
+**鲁棒性加固（2026-08 修复）**：
+- **角色名可信度过滤**——`_extract_plausible_name` 排除代词 / 动词短语 / 天气场景词，宁缺毋滥：`"坚持己见" → ""`、`"他说：我们走吧" → ""`、`"林夏在评审会上坚持自研方案" → "林夏"`。
+- **分词级世界观提取**——`WorldBuilder` 按连接词 / 标点预分词后整词匹配、长后缀优先：`"青云宗与魔道势力在苍云大陆" → 势力 ["青云宗","魔道势力"]、地理 ["苍云大陆"]`，连接词不再被吞入。
+- **修文全量替换**——`AutomaticRepairEngine` 一次性替换全部生硬转折词（`突然 / 莫名 / 鬼使神差 …`），并合并相邻重复的过渡短语。
+- **引擎隔离检测**——两引擎均内置 `_ENGINE_FINGERPRINT` 与 `check_engine_isolation()`：同一进程混用时立即警告，杜绝同名异构数据类（`CausalNode` / `ResponsibilityAccount` 等）互相覆盖导致的数据错乱与崩溃。
 
 </div>
 
@@ -81,6 +87,11 @@ def load(name, path):
 
 biz = load("biz", "engine for business.py")
 print([s.name for s in biz.SPLStage])   # STRIP_NARRATIVE … LOCK_RESPONSIBILITY
+
+# 引擎隔离检测：混用两引擎时给出明确警告
+# （两引擎均已向 sys.modules 注册指纹，任何加载方式都能被检测到）
+for conflict in biz.check_engine_isolation():
+    print(f"⚠️ {conflict}")
 ```
 
 或直接运行内置引擎：
