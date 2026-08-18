@@ -375,6 +375,11 @@ class UltimateCausalNovelEngine:
 
     def set_llm_provider(self, provider: LLMProvider) -> None:
         self.llm_provider = provider
+        # 同步下游引擎：深度诊断与世界观深校验可由 LLM 驱动
+        if getattr(self, "sp_engine", None) is not None:
+            self.sp_engine.llm_provider = provider
+        if getattr(self, "world_builder", None) is not None:
+            self.world_builder.llm_provider = provider
 
     def _init_audit_engines(self):
         self.planning_auditor = CognitiveAuditEngine(
@@ -400,7 +405,7 @@ class UltimateCausalNovelEngine:
         self.node_auditor.register_plugin(AuditPlugin("logical_jump_detection", self._audit_logical_jump))
         self.node_auditor.register_plugin(AuditPlugin("premise_conclusion_match", self._audit_premise_conclusion_match))
         self.consistency_auditor.register_plugin(AuditPlugin("character_consistency", self._audit_character_consistency))
-        self.consistency_auditor.register_plugin(AuditPlugin("world_rule_consistency", lambda ctx: self.world_builder.check_consistency(ctx, self.global_state)))
+        self.consistency_auditor.register_plugin(AuditPlugin("world_rule_consistency", lambda ctx: self.world_builder.check_deep_consistency(ctx, self.global_state)))
         self.vulnerability_auditor.register_plugin(AuditPlugin("vulnerability_assessment", self._audit_vulnerability))
 
     def _audit_implicit_assumptions(self, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -498,11 +503,14 @@ class UltimateCausalNovelEngine:
         full_content = ""
         for line in chapter.causal_lines:
             for i, node in enumerate(line.nodes):
+                # 首轮生成（无 provider 时内部降级为规则生成）
+                if i > 0:
+                    text = self._call_llm_to_bridge_gap(line.nodes[i-1], node, chapter)
+                else:
+                    text = self._call_llm_for_node(node, chapter)
+                node_audit = None
+                vuln_audit = None
                 for attempt in range(max_retries):
-                    if i > 0:
-                        text = self._call_llm_to_bridge_gap(line.nodes[i-1], node, chapter)
-                    else:
-                        text = self._call_llm_for_node(node, chapter)
                     node_audit = self.node_auditor.audit(
                         {"node": node, "text": text, "global_state": asdict(self.global_state)}
                     )
@@ -511,15 +519,22 @@ class UltimateCausalNovelEngine:
                         node.audit_report = {**node_audit, "vulnerability": vuln_audit}
                         full_content += text + "\n\n"
                         break
-                    # 尝试用 LLM 修复（如果提供了 provider）
+                    # 审计失败：优先带因果约束的 LLM 重写（若提供了 provider），否则降级规则修复
+                    if self.llm_provider is not None:
+                        rewritten = self._call_llm_rewrite_with_constraints(node, node_audit, vuln_audit)
+                        if rewritten:
+                            text = rewritten
+                            continue
                     text = self.repair_engine.repair(text, node_audit, self.llm_provider)
-                else:
-                    text = self.repair_engine.repair(
-                        text,
-                        {"analysis": {"logical_jump_detection": {"issues": ["发现逻辑跳跃词"]}}},
-                        self.llm_provider
-                    )
-                    full_content += text + "\n\n"
+            else:
+                # 用尽重试仍失败：兜底 repair
+                text = self.repair_engine.repair(
+                    text,
+                    {"analysis": {"logical_jump_detection": {"issues": ["发现逻辑跳跃词"]}}},
+                    self.llm_provider
+                )
+                node.audit_report = {**node_audit, "vulnerability": vuln_audit} if node_audit else {}
+                full_content += text + "\n\n"
         consistency_audit = self.consistency_auditor.audit(
             {"chapter": asdict(chapter), "text": full_content, "global_state": asdict(self.global_state)}
         )
@@ -533,17 +548,57 @@ class UltimateCausalNovelEngine:
         sp_hedge = self.sp_engine.vulnerability_hedge(sp_chain)
         sp_anchor = self.sp_engine.responsibility_anchor(sp_chain)
         sp_recon = self.sp_engine.causal_reconstruction(sp_chain, fix_vars=[], target_state="叙事逻辑自洽")
-        chapter.audit_report = {**consistency_audit, "second_perspective": {
+        # 若注入了 LLM，用 deep_diagnose 做语义级深度诊断并合并（保持字段兼容）
+        sp_deep = self.sp_engine.deep_diagnose(sp_chain, self.world_builder.world_rules)
+        second_perspective = {
             "collapse_verdict": sp_hedge["collapse_verdict"],
             "anchors": sp_anchor,
             "reconstruction": sp_recon,
-        }}
+        }
+        if sp_deep:
+            second_perspective["deep"] = sp_deep
+        chapter.audit_report = {**consistency_audit, "second_perspective": second_perspective}
         changes = self.state_extractor.extract(full_content, self.global_state)
         for key, val in changes.items():
             self._apply_state_change(key, val)
         self.global_state.version += 1
         chapter.global_state_after = json.loads(json.dumps(asdict(self.global_state)))
         return full_content
+
+    def _call_llm_rewrite_with_constraints(self, node: CausalNode, node_audit: Dict[str, Any], vuln_audit: Dict[str, Any]) -> Optional[str]:
+        """审计失败后将审计问题作为约束回传 LLM 重写；无 provider 或异常时返回 None（由调用方降级 repair）。"""
+        if self.llm_provider is None:
+            return None
+        issues = []
+        for name, res in node_audit.get("analysis", {}).items():
+            for issue in res.get("issues", []):
+                issues.append(f"[{name}] {issue}")
+        for issue in vuln_audit.get("issues", []):
+            issues.append(f"[vulnerability] {issue}")
+        if not issues:
+            return None
+        lang = (self.output_language or "zh").lower().strip()
+        issue_text = "\n".join(issues)
+        if lang in ("en", "english"):
+            prompt = f"""You are a top-tier plot-logic architect.
+Characters: {self.global_state.characters}
+Evolve the plot from premise [{node.premise}] to conclusion [{node.conclusion}].
+The previous draft FAILED logic audit with these issues:
+{issue_text}
+Rewrite to eliminate them. Motivations must be clear. Avoid abrupt words.
+Output 120-200 English words."""
+        else:
+            prompt = f"""你是一名顶级情节逻辑架构师。
+角色设定：{self.global_state.characters}
+请将情节起点【{node.premise}】自然演进至故事走向【{node.conclusion}】。
+上一次生成未通过逻辑审计，具体问题如下：
+{issue_text}
+请重写以消除上述问题，保持人物性格与情节连贯，严禁生硬转折词。
+输出150-250字的小说文本。"""
+        try:
+            return self.llm_provider.generate(prompt, temperature=0.6, max_tokens=8000)
+        except Exception:
+            return None
 
     def _call_llm_for_node(self, node: CausalNode, chapter: Chapter) -> str:
         lang = (self.output_language or "zh").lower().strip()
@@ -704,6 +759,9 @@ Avoid abrupt words like "suddenly", "out of nowhere". Do NOT repeat previous con
 class SecondPerspectiveCausalEngine:
     """决定论因果推理：仅做因果链的结构性判定，不输出概率估计。"""
 
+    def __init__(self, llm_provider: Optional[LLMProvider] = None):
+        self.llm_provider = llm_provider
+
     _COLOCATION_HINTS = ["车站", "站台", "电车", "街道", "房间", "同处", "见面", "相遇", "战场", "广场"]
     _MOTION_HINTS = ["追", "跑", "走", "离开", "去", "赶到", "赶来", "冲", "奔"]
     _COMMS_HINTS = ["发消息", "打电话", "拉黑", "联系", "回复", "微信", "短信", "传讯"]
@@ -808,6 +866,25 @@ class SecondPerspectiveCausalEngine:
         """兜底角色推断：当事件未显式声明 character 时，提取首个 2-3 字中文名候选。"""
         m = re.search(r"([\u4e00-\u9fa5]{2,3})", text)
         return m.group(1) if m else ""
+    def deep_diagnose(self, chain: List[Dict[str, Any]], world_rules: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """注入 LLM 时，把整段因果链 + 世界观规则交给 LLM 做语义级深度诊断；否则返回 None（由调用方降级到五步规则）。"""
+        if self.llm_provider is None:
+            return None
+        chain_json = json.dumps(chain, ensure_ascii=False)
+        rules_json = json.dumps(world_rules, ensure_ascii=False)
+        prompt = f"""你是决定论因果审计引擎。给定因果链与世界规则，请做语义级深度诊断。
+因果链：{chain_json}
+世界规则：{rules_json}
+请严格输出 JSON：
+{{"weakest_variable": <事件id或null>, "inevitable_assumptions": [<str>], "responsibility_anchors": [<str>], "reconstruction_advice": <str>, "collapse_verdict": "INEVITABLE_COLLAPSE|CONDITIONAL_COLLAPSE|STABLE"}}"""
+        try:
+            resp = self.llm_provider.generate(prompt, temperature=0.2, max_tokens=2000)
+            data = json.loads(resp)
+            data["deep"] = True
+            return data
+        except Exception:
+            return None
+
     def _extract_action(self, conclusion):
         for w in self._MOTION_HINTS + self._COMMS_HINTS:
             if w in conclusion:
@@ -821,7 +898,8 @@ class SecondPerspectiveCausalEngine:
 class WorldBuilder:
     """从自然语言提纲构思世界观骨架，并维护 world_rules，供 world_rule_consistency 真实校验。"""
 
-    def __init__(self):
+    def __init__(self, llm_provider: Optional[LLMProvider] = None):
+        self.llm_provider = llm_provider
         self.factions: List[str] = []
         self.geography: List[str] = []
         self.laws: List[str] = []
@@ -864,6 +942,35 @@ class WorldBuilder:
         score = max(0.0, 100.0 - len(violations) * 20)
         return {"passed": len(violations) == 0, "score": score,
                 "violations": violations, "world_rules": self.world_rules}
+
+    def check_deep_consistency(self, context: Dict[str, Any], global_state=None) -> Dict[str, Any]:
+        """注入 LLM 时，将世界观规则 + 章节文本交给 LLM 检测设定级冲突（如凡人施法）；否则降级到 check_consistency。"""
+        if self.llm_provider is None:
+            return self.check_consistency(context, global_state)
+        text = ""
+        if isinstance(context, dict):
+            text = context.get("text", "") or ""
+            ch = context.get("chapter")
+            if isinstance(ch, dict):
+                text = text or str(ch.get("content", ""))
+        if not text:
+            return {"passed": True, "score": 100, "violations": [], "deep": True,
+                    "note": "无可检文本，跳过硬性校验"}
+        rules_json = json.dumps(self.world_rules, ensure_ascii=False)
+        prompt = f"""你是世界观一致性审计专家。
+世界观规则：{rules_json}
+待检文本：{text}
+请检测文本是否违反世界观设定（如凡人施展需灵根者方能为之的法术、禁用之物出现、法则冲突等）。
+仅输出 JSON：{{"violations": [<str>], "passed": <bool>}}"""
+        try:
+            resp = self.llm_provider.generate(prompt, temperature=0.2, max_tokens=800)
+            data = json.loads(resp)
+            violations = data.get("violations", [])
+            return {"passed": data.get("passed", len(violations) == 0),
+                    "score": max(0.0, 100.0 - len(violations) * 20),
+                    "violations": violations, "world_rules": self.world_rules, "deep": True}
+        except Exception:
+            return self.check_consistency(context, global_state)
 
 
 # =============================================================================
