@@ -287,12 +287,33 @@ def extract_character_from_text(text: str) -> str:
     return match.group(1) if match else "主角"
 
 def auto_register_characters(state: GlobalState, nodes: List[CausalNode]):
-    """自动注册节点中出现的不在 state.characters 中的角色"""
+    """自动注册节点中出现的不在 state.characters 中的角色。
+    加固：残片净化——若候选名以动词/虚词结尾（如「林夏在」「周舟梳」），剥去残片后
+    以真实名字注册（「林夏」「周舟」）；若净化结果与已注册角色重叠，跳过避免污染。"""
+    # 常见动词/虚词残片，防止「林夏在」「周舟梳」被当作角色名
+    _TAIL_NOISE = ("在", "去", "来", "说", "道", "了", "着", "过", "和", "与", "跟",
+                   "一起", "前往", "来到", "回到", "离开", "看着", "听", "见", "问", "答",
+                   "坚持", "梳理", "理", "梳", "意识", "同意", "评估", "决定", "认为", "觉得", "想")
     for node in nodes:
         # 尝试从 premise 和 conclusion 中提取角色名
         for text in [node.premise, node.conclusion]:
             char = extract_character_from_text(text)
-            if char and char not in state.characters:
+            if not char or char == "主角":
+                continue
+            # 群像词开头 → 跳过
+            if char.startswith(("两人", "双方", "一人", "三人", "众人")):
+                continue
+            # 残片净化：剥去尾部动词/虚词，得到真实名字
+            base = char
+            while base.endswith(_TAIL_NOISE):
+                base = base[:-1]
+            if len(base) < 2:
+                continue  # 剥完只剩 1 字或无，放弃
+            # 若净化结果与已注册角色重叠（如已有「林夏」，又出现「林夏在」）→ 跳过
+            if base != char and any(base in c or c in base for c in state.characters):
+                continue
+            char = base
+            if char not in state.characters:
                 state.characters[char] = {"性格": "中性", "简介": "自动注册的角色"}
                 # 自动添加默认情感约束（轻度）
                 if char not in state.emotional_constraints:
@@ -350,6 +371,7 @@ class UltimateCausalNovelEngine:
         self.report_generator = VisualReportGenerator()
         self.sp_engine = SecondPerspectiveCausalEngine()
         self.world_builder = WorldBuilder()
+        self.style_recognizer = StyleRecognizer()
 
     def set_llm_provider(self, provider: LLMProvider) -> None:
         self.llm_provider = provider
@@ -655,6 +677,25 @@ Avoid abrupt words like "suddenly", "out of nowhere". Do NOT repeat previous con
         self.global_state.world_rules.update(self.world_builder.world_rules)
         return self.world_builder.world_rules
 
+    def recognize_style(self, text: str = "", chapters: List[Chapter] = None, outline: str = "") -> Dict[str, Any]:
+        """文体风格自动识别（接入 StyleRecognizer）。
+
+        两种用法：
+          1. recognize_style(text=导入的一段文本)         → 识别单段/单文档文体
+          2. recognize_style(chapters=已渲染章节, outline=大纲) → 识别整部作品基调
+        识别结果写入 world_rules["style_profile"]，供后续生成提示词按文体微调。
+        """
+        # 章节非空 → 整部作品基调；否则走单段/大纲识别
+        if chapters:
+            full = "\n".join([(c.content or "") for c in chapters if getattr(c, "content", None)])
+            profile = StyleRecognizer.analyze_work(full, outline)
+            profile["scope"] = "whole_work"
+        else:
+            profile = StyleRecognizer.analyze(text or outline)
+            profile["scope"] = "segment"
+        self.global_state.world_rules["style_profile"] = profile
+        return profile
+
 # =============================================================================
 # 第二视角因果推理引擎 V2.1（决定论内核，无概率化推测）
 # 五步算子：叙事剥离 → 内隐假设透视 → 脆弱性对冲 → 责任闭环锚定 → 因果重构
@@ -825,6 +866,128 @@ class WorldBuilder:
                 "violations": violations, "world_rules": self.world_rules}
 
 
+# =============================================================================
+# StyleRecognizer：文体风格识别（题材 / 人称 / 视角 / 语言风格 / 节奏 五维）
+# 纯规则、零依赖、可解释。既可识别单段导入文本，也可识别整部作品基调。
+# 识别结果写入 world_rules["style_profile"]，供后续生成提示词按文体微调。
+# =============================================================================
+class StyleRecognizer:
+    """从自然语言文本识别文体风格。
+
+    五维输出：
+      - genre       题材类型（修仙/玄幻/科幻/悬疑/历史/都市/奇幻/武侠/军事/末世…）
+      - person      叙事人称（第一人称 / 第三人称）
+      - perspective 叙事视角（全知 / 限知 / 中性的旁观）
+      - language    语言风格（古风 / 现代 / 文言）
+      - pace        叙事节奏（快 / 中 / 慢）
+    """
+
+    # —— 题材特征词表（命中即计分）——
+    GENRE_KEYWORDS = {
+        "修仙": ["修仙", "修炼", "金丹", "元婴", "筑基", "渡劫", "灵根", "灵脉", "洞府", "飞升", "道心", "丹田", "功法", "宗门"],
+        "玄幻": ["斗气", "斗者", "魂力", "斗罗", "武魂", "血脉觉醒", "异火", "战尊", "圣域", "位面", "大陆", "魔导", "斗技"],
+        "科幻": ["星际", "飞船", "宇宙", "机械", "量子", "AI", "人工智能", "机器人", "基因", "外星球", "太空", "纳米", "冬眠"],
+        "悬疑": ["线索", "真相", "谜团", "调查", "侦探", "案件", "凶手", "证据", "密室", "推理", "嫌疑人", "失踪", "悬案"],
+        "历史": ["王朝", "皇帝", "将军", "征战", "朝堂", "谋略", "粮草", "边关", "府兵", "天下", "诸侯", "科举", "宦官"],
+        "都市": ["都市", "公司", "职场", "总裁", "CEO", "办公室", "合同", "会议", "咖啡", "地铁", "合租", "加班", "白领"],
+        "奇幻": ["魔法", "精灵", "巨龙", "法师", "炼金", "王国", "骑士", "咒语", "魔杖", "城堡", "矮人", "兽人", "森林精灵"],
+        "武侠": ["江湖", "内力", "剑法", "掌门", "侠客", "轻功", "点穴", "武林", "门派", "武学", "招式", "秘籍", "暗器"],
+        "军事": ["战场", "部队", "指挥官", "装甲", "战术", "包围", "前线", "突击", "军团", "火力", "侦察", "阵地", "硝烟"],
+        "末世": ["末世", "丧尸", "变异", "幸存者", "庇护所", "病毒", "废土", "末日", "灾变", "辐射", "救援队", "沦陷"],
+    }
+    # 若同时命中多个题材，取命中数最多者；平手返回 None（不误判）
+    _MAX_GENRE_HIT = 3
+
+    # —— 人称特征 ——
+    _FIRST_PERSON = ["我", "我们", "我的", "咱们"]
+    _THIRD_PERSON = ["他", "她", "他们", "她们", "它的"]
+
+    # —— 视角特征：全知解说词 vs 限知心理词 ——
+    _OMNISCIENT_WORDS = ["殊不知", "原来", "事实上", "实际上", "要知道", "众所周知", "话说", "且说", "却说", "正是", "但见"]
+    _LIMITED_WORDS = ["心想", "暗自", "觉得", "感到", "意识到", "恍然", "似乎", "好像", "隐约", "猜测"]
+
+    # —— 语言风格 ——
+    _ANCIENT_WORDS = ["之乎者也", "矣", "焉", "哉", "欲", "遂", "乃", "吾", "汝", "妾", "卿", "如何", "倘若", "莫非", "何以"]
+    # 文言高频虚字：单字计分，出现即加权
+    _CLASSICAL_CHARS = "之乎者也矣焉哉夫其而于所与及以若者乃遂辄弗尝"
+    _MODERN_WORDS = ["其实", "对了", "好吧", "然后", "但是", "不过", "应该", "觉得", "真的", "特别", "非常", "居然"]
+
+    @classmethod
+    def _score_by_keyword(cls, text: str, word_list) -> int:
+        if not text:
+            return 0
+        return sum(1 for w in word_list if w in text)
+
+    @classmethod
+    def analyze(cls, text: str) -> Dict[str, Any]:
+        """识别单段/单文档文本的文体风格。返回五维字典。"""
+        if not text:
+            return {"genre": None, "person": "未知", "perspective": "未知",
+                    "language": "未知", "pace": "未知", "confidence": 0.0}
+        # 1) 题材：命中即判定（短文本/大纲同样有效）；无中文或零命中则 None
+        genre_scores = {g: cls._score_by_keyword(text, words) for g, words in cls.GENRE_KEYWORDS.items()}
+        top_genre = max(genre_scores, key=genre_scores.get)
+        genre = top_genre if genre_scores[top_genre] >= 1 else None
+        # 2) 人称：统计「我/我们」类与「他/她/他们」类，排除短文本噪声
+        first = cls._score_by_keyword(text, cls._FIRST_PERSON)
+        third = cls._score_by_keyword(text, cls._THIRD_PERSON)
+        # 单字"我/他/她"仅在句中独立出现时计入（避免"我们"被"我"重复计、名词误判）
+        first += len(re.findall(r"(?<!我们)我(?!们)", text))
+        third += len(re.findall(r"他|她", text))
+        if first >= 3 and first > third:
+            person = "第一人称"
+        elif third >= 3 and third > first:
+            person = "第三人称"
+        elif first > third:
+            person = "第一人称"
+        elif third > first:
+            person = "第三人称"
+        else:
+            person = "未知"
+        # 3) 视角
+        omni = cls._score_by_keyword(text, cls._OMNISCIENT_WORDS)
+        limited = cls._score_by_keyword(text, cls._LIMITED_WORDS)
+        perspective = "全知" if omni > limited else ("限知" if limited > omni else "中性旁观")
+        # 4) 语言风格
+        ancient = cls._score_by_keyword(text, cls._ANCIENT_WORDS)
+        classical = sum(1 for ch in text if ch in cls._CLASSICAL_CHARS)
+        modern = cls._score_by_keyword(text, cls._MODERN_WORDS)
+        if classical >= 6 or ancient >= 4:
+            language = "文言"
+        elif ancient >= 2 or classical >= 3:
+            language = "古风"
+        elif modern >= 3:
+            language = "现代"
+        else:
+            language = "中性"
+        # 5) 节奏：句均长（字符/句号+逗号片段数），短句占比
+        sentences = [s for s in re.split(r"[。！？!?]", text) if s.strip()]
+        total_len = len(text.replace(" ", ""))
+        avg = (total_len / max(1, len(sentences))) if sentences else 0
+        short_ratio = sum(1 for s in sentences if len(s) <= 12) / max(1, len(sentences))
+        if avg <= 18 or short_ratio >= 0.5:
+            pace = "快"
+        elif avg >= 40 and short_ratio <= 0.25:
+            pace = "慢"
+        else:
+            pace = "中"
+        confidence = min(1.0, (len(sentences) / 20.0) + (0.1 if genre else 0))
+        return {"genre": genre, "person": person, "perspective": perspective,
+                "language": language, "pace": pace, "confidence": round(confidence, 2)}
+
+    @classmethod
+    def analyze_work(cls, chapters_text: str, outline: str = "") -> Dict[str, Any]:
+        """识别整部作品的文体基调：综合全文 + 大纲，题材取两者中命中更强的一侧。"""
+        main = cls.analyze(chapters_text)
+        if outline:
+            outline_prof = cls.analyze(outline)
+            # 题材：全文与大纲合并取命中更强者
+            combined = cls.analyze(chapters_text + "\n" + outline)
+            main["genre"] = combined["genre"] if combined["genre"] else main["genre"]
+            main["genre_source"] = "combined"
+        return main
+
+
 # ==================== 演示示例（题材中性） ====================
 if __name__ == "__main__":
     # 极简演示：使用 MockLLM（无API）
@@ -840,3 +1003,17 @@ if __name__ == "__main__":
     if chapter:
         content = engine.render_chapter(chapter)
         print(content)
+
+    # —— 文体风格自动识别演示（导入文本 / 大纲均可）——
+    print("\n===== 文体风格自动识别 =====")
+    import textwrap
+    demo_para = (
+        "李青云盘坐洞府之中，丹田内灵力翻涌，金丹微微颤动。"
+        "他运转功法，渡劫在即，道心却有一丝动摇。"
+    )
+    seg = engine.recognize_style(text=demo_para)
+    print(f"[导入文本] 题材={seg['genre']} 人称={seg['person']} 视角={seg['perspective']} "
+          f"语言={seg['language']} 节奏={seg['pace']}")
+    work = engine.recognize_style(chapters=engine.chapters, outline=outline)
+    print(f"[作品基调] 题材={work['genre']} 人称={work['person']} 视角={work['perspective']} "
+          f"语言={work['language']} 节奏={work['pace']}")
