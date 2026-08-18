@@ -1122,7 +1122,11 @@ class CausalIntersectionBroker:
 # =============================================================================
 # 认知审计引擎（故事原生质量评分）
 # =============================================================================
-class CognitiveAuditEngine:
+class StoryQualityAuditEngine:
+    """故事质量审计（原 CognitiveAuditEngine）：情感相空间安全 + 故事质量专项审计。
+
+    已按插件化架构改造：本类作为可复用审计单元，由插件化 CognitiveAuditEngine 注册调用。
+    """
     def __init__(self, account: ResponsibilityAccount, allowed_stages: List[str]):
         self.account = account
         self.allowed_stages = allowed_stages
@@ -1196,6 +1200,112 @@ class CognitiveAuditEngine:
             "element_count": len(element_types),
             "foreshadow_count": foreshadow_count,
         }
+
+
+# =============================================================================
+# 插件化认知审计引擎（Cognitive Audit Engine 集成）
+# 设计定位：在「第二视角因果与剧情推演」框架下，对决策进行静态诊断与因果重构推演。
+# 核心能力：
+#   1. 责任闭环锚定 —— 将审计绑定到具体的组织/角色/决策阶段，并附防重放 nonce。
+#   2. 静态诊断 —— 通过可插拔的分析插件，提取偏见、脆弱性等风险信号。
+#   3. 因果重构推演 —— 注入修正变量 (delta_vars) 重构逻辑链，并评估系统收敛至目标稳态。
+# 本模块不含任何主观/概率化推测，仅做决定论因果处理。
+# =============================================================================
+class AuditConfigLoader:
+    """审计配置加载器：从字典或 JSON 文件载入审计运行参数（免责声明、允许阶段、自定义字段等）。"""
+    @staticmethod
+    def load_from_dict(config: Dict[str, Any]) -> Dict[str, Any]:
+        return config
+
+    @staticmethod
+    def load_from_json(path: str) -> Dict[str, Any]:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+
+class AuditPlugin:
+    """审计插件：将一个具名分析函数封装为可注册的审计单元。
+
+    Args:
+        name:         插件名称，作为报告中的分析键。
+        analyze_func: 分析函数，接收 decision_context 并返回任意分析结果（通常为含 status 的字典）。
+    """
+
+    def __init__(self, name: str, analyze_func: Callable[[Dict[str, Any]], Any]):
+        self.name = name
+        self.analyze = analyze_func
+
+
+class CognitiveAuditEngine:
+    """认知审计引擎核心（插件化）：负责责任锚定、静态诊断与因果重构推演。
+
+    Args:
+        account: 责任账户（组织/角色/阶段），用于责任闭环锚定。
+        config:  审计配置（免责声明、allowed_stages、custom_fields 等）。
+    """
+
+    def __init__(self, account: ResponsibilityAccount, config: Dict[str, Any]):
+        self.account = account
+        self.config = config
+        self.plugins: List[AuditPlugin] = []
+
+        allowed_stages = self.config.get("allowed_stages", [])
+        if allowed_stages and account.stage not in allowed_stages:
+            raise ValueError(f"Unsupported stage: {account.stage}")
+
+    def register_plugin(self, plugin: AuditPlugin) -> None:
+        self.plugins.append(plugin)
+
+    def audit(self, decision_context: Dict[str, Any]) -> Dict[str, Any]:
+        """静态诊断阶段：提取上下文、遍历注册插件并生成偏见/脆弱性评估报告。"""
+        report = {
+            "disclaimer": self.config.get("disclaimer", ""),
+            "responsibility_account": self.account.__dict__,
+            "analysis": {},
+            "custom_fields": self.config.get("custom_fields", {}),
+        }
+        for plugin in self.plugins:
+            report["analysis"][plugin.name] = plugin.analyze(decision_context)
+        return report
+
+    def reconstruct(
+        self,
+        decision_context: Dict[str, Any],
+        delta_vars: Dict[str, Any],
+        convergence_evaluator: Optional[Callable[[Dict[str, Any], Dict[str, Any]], bool]] = None,
+    ) -> Dict[str, Any]:
+        """因果重构推演算子：
+        1. 注入修正变量 (delta_vars) 重构逻辑链条
+        2. 进行二次反事实校验与审计
+        3. 评估系统是否收敛至目标稳态
+        """
+        reconstructed_context = copy.deepcopy(decision_context)
+        reconstructed_context.update(delta_vars)
+
+        original_report = self.audit(decision_context)
+        reconstructed_report = self.audit(reconstructed_context)
+
+        if convergence_evaluator:
+            is_converged = convergence_evaluator(original_report, reconstructed_report)
+        else:
+            is_converged = self._default_convergence_check(reconstructed_report)
+
+        return {
+            "status": "CONVERGED" if is_converged else "DIVERGED",
+            "delta_variables": delta_vars,
+            "reconstructed_context": reconstructed_context,
+            "reconstructed_report": reconstructed_report,
+            "is_converged": is_converged,
+        }
+
+    @staticmethod
+    def _default_convergence_check(reconstructed_report: Dict[str, Any]) -> bool:
+        """默认判定逻辑：检查重构后的分析插件输出中是否已无高风险或中断状态。"""
+        analysis = reconstructed_report.get("analysis", {})
+        for plugin_name, result in analysis.items():
+            if isinstance(result, dict) and result.get("status") in ["BLOCKED", "HIGH_RISK", "CRITICAL"]:
+                return False
+        return True
 
 
 # =============================================================================
@@ -1286,8 +1396,35 @@ class SPLStoryGenerationEngine:
         )
         self.hedger = VulnerabilityHedge(self.main_account, self.state, self.sp_engine)
         self.broker = CausalIntersectionBroker()
-        self.auditor = CognitiveAuditEngine(
+        self.story_auditor = StoryQualityAuditEngine(
             self.main_account, [s.name for s in SPLStage]
+        )
+        self.auditor = CognitiveAuditEngine(
+            self.main_account,
+            {
+                "allowed_stages": [s.name for s in SPLStage],
+                "disclaimer": "SPL 故事生成认知审计（插件化 Cognitive Audit Engine）",
+            },
+        )
+        self.auditor.register_plugin(
+            AuditPlugin(
+                "phase_space_safety",
+                lambda ctx: self.story_auditor.audit_phase_space_safety(
+                    ctx["emotional_registry"]
+                )
+                if "emotional_registry" in ctx
+                else {"status": "SKIPPED"},
+            )
+        )
+        self.auditor.register_plugin(
+            AuditPlugin(
+                "story_quality",
+                lambda ctx: self.story_auditor.audit_story_quality(
+                    ctx["chapter"], ctx["nodes"]
+                )
+                if "chapter" in ctx
+                else {"status": "SKIPPED"},
+            )
         )
         self.scribe = StylisticScribe()
 
@@ -1344,10 +1481,10 @@ class SPLStoryGenerationEngine:
                 hedged_nodes, self.state.emotional_registry
             )
 
-            # 双层审计
-            rule_audit = self.auditor.audit_phase_space_safety(
-                self.state.emotional_registry
-            )
+            # 双层审计（插件化 CognitiveAuditEngine）
+            rule_audit = self.auditor.audit(
+                {"emotional_registry": self.state.emotional_registry}
+            )["analysis"]["phase_space_safety"]
             if rule_audit["is_fatal"]:
                 raise RuntimeError(f"情感稳态击穿：{rule_audit['issues']}")
             if rule_audit["warnings"]:
@@ -1400,7 +1537,10 @@ class SPLStoryGenerationEngine:
                     )
 
             # 【SPL 4 责任闭环：故事质量评分 + 第二视角责任锚定】
-            quality_audit = self.auditor.audit_story_quality(chapter_graph, valid_nodes)
+            plugin_report = self.auditor.audit(
+                {"chapter": chapter_graph, "nodes": valid_nodes}
+            )
+            quality_audit = plugin_report["analysis"]["story_quality"]
             chapter_graph.actual_tension = (
                 sum(tension_curve) / len(tension_curve) if tension_curve else 0
             )
@@ -1419,6 +1559,7 @@ class SPLStoryGenerationEngine:
                 "emotion_audit": rule_audit,
                 "quality_audit": quality_audit,
                 "responsibility_anchors": sp_anchors,
+                "plugin_audit": plugin_report,
             }
 
             # 【SPL 5 因果重构：第二视角五步内核第五步】
