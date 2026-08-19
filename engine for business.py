@@ -1,317 +1,9 @@
-import uuid
 import json
 import re
-import math
-import dataclasses
-import copy
-import traceback
 from datetime import datetime
-from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional, Protocol, Set, Tuple, Callable
-from collections import defaultdict, deque
+from typing import Dict, Any, List, Optional, Set
+from collections import defaultdict
 from enum import Enum, auto
-
-# =============================================================================
-# 引擎隔离防护
-# =============================================================================
-# 本文件是 Business 引擎。同目录「Story Engine for Creator.py」是 Creator 引擎。
-# 两个引擎含多个同名异构数据类（CausalNode / ResponsibilityAccount / ImplicitAssumption /
-# CognitiveAuditEngine / NarrativeStripper …），字段与接口不兼容：混用会导致类互相覆盖、
-# 数据错乱甚至崩溃。唯一例外：SecondPerspectiveCausalEngine（第二视角五步因果内核）
-# 在两个引擎中实现完全一致，可安全共享。
-_ENGINE_FINGERPRINT = "business"
-
-# —— 全局引擎注册表 ——
-# module_from_spec 方式加载（见 README load() 示例）不会自动注册进 sys.modules，
-# 这里把指纹登记到 sys.modules 的保留键，使 check_engine_isolation 对任何加载方式都有效。
-import sys as _sys
-_SYS_REG_KEY = "__story_engine_fingerprints__"
-_loaded = _sys.modules.get(_SYS_REG_KEY)
-if not isinstance(_loaded, dict):
-    _loaded = {}
-    _sys.modules[_SYS_REG_KEY] = _loaded
-_loaded.setdefault(__name__, _ENGINE_FINGERPRINT)
-
-
-def check_engine_isolation() -> List[str]:
-    """检测当前进程是否同时加载了 Creator 与 Business 两个引擎，返回冲突描述列表（空 = 安全）。"""
-    import sys
-
-    conflicts: List[str] = []
-    other_engines: List[str] = []
-    # 1) 全局注册表（覆盖 module_from_spec 手动加载的场景）
-    reg = sys.modules.get(_SYS_REG_KEY)
-    if isinstance(reg, dict):
-        for mod_name, fp in reg.items():
-            if mod_name != __name__ and fp != _ENGINE_FINGERPRINT and mod_name not in other_engines:
-                other_engines.append(mod_name)
-    # 2) sys.modules 中已注册的引擎模块（覆盖正常 import 的场景）
-    for mod_name, mod in list(sys.modules.items()):
-        if mod is None or mod_name == __name__ or mod_name == _SYS_REG_KEY:
-            continue
-        fp = getattr(mod, "_ENGINE_FINGERPRINT", None)
-        if fp is not None and fp != _ENGINE_FINGERPRINT and mod_name not in other_engines:
-            other_engines.append(mod_name)
-    if other_engines:
-        conflicts.append(
-            f"检测到 Creator 引擎（模块 {other_engines!r}）与 Business 引擎同时加载："
-            "两者同名数据类（CausalNode 等）字段不兼容，混用会导致数据错乱、程序崩溃。"
-            "请勿在同一进程混用两个引擎；唯一可安全共享的是 SecondPerspectiveCausalEngine。"
-        )
-    return conflicts
-
-
-# =============================================================================
-# 角色名候选可信度过滤（防「坚持己见→坚持己」「他说→他说」「下雨了→下雨了」式乱认）
-# 与 Creator 引擎保持同一份实现，确保两引擎口径一致。
-# =============================================================================
-_NAME_PRONOUN_HEADS = (
-    "他",
-    "她",
-    "它",
-    "我",
-    "你",
-    "咱",
-    "吾",
-    "汝",
-    "其",
-    "这",
-    "那",
-    "我们",
-    "你们",
-    "他们",
-    "她们",
-    "它们",
-)
-_NAME_VERB_HEADS = (
-    "说",
-    "道",
-    "问",
-    "答",
-    "喊",
-    "叫",
-    "想",
-    "看",
-    "听",
-    "走",
-    "跑",
-    "来",
-    "去",
-    "是",
-    "有",
-    "在",
-    "坚持",
-    "认为",
-    "觉得",
-    "决定",
-    "意识",
-    "同意",
-    "评估",
-    "梳理",
-    "分析",
-    "理解",
-    "发现",
-    "感到",
-    "知道",
-    "离开",
-    "来到",
-    "回到",
-    "前往",
-    "看见",
-    "听到",
-    "想起",
-    "望着",
-    "看着",
-    "听见",
-    "点头",
-    "摇头",
-    "沉默",
-    "开口",
-    "转身",
-    "回头",
-    "抬头",
-    "低头",
-    "坐下",
-    "起身",
-    "推开",
-    "关上",
-    "拿起",
-    "放下",
-    "掏出",
-    "停下",
-    "愣住",
-    "怔住",
-    "惊醒",
-    "醒来",
-    "出门",
-    "进屋",
-)
-_NAME_TAIL_NOISE = (
-    "在",
-    "去",
-    "来",
-    "说",
-    "道",
-    "了",
-    "着",
-    "过",
-    "和",
-    "与",
-    "跟",
-    "吧",
-    "呢",
-    "吗",
-    "啊",
-    "呀",
-    "么",
-    "哈",
-    "哦",
-    "走",
-    "问",
-    "答",
-    "喊",
-    "叫",
-    "想",
-    "看",
-    "听",
-    "见",
-    "一起",
-    "前往",
-    "来到",
-    "回到",
-    "离开",
-    "看着",
-    "梳理",
-    "理",
-    "梳",
-    "意识",
-    "同意",
-    "评估",
-    "决定",
-    "认为",
-    "觉得",
-    "意识到",
-    "发现",
-    "感到",
-    "知道",
-)
-_NAME_FULL_NOISE = (
-    "下雨",
-    "下雪",
-    "刮风",
-    "起风",
-    "打雷",
-    "闪电",
-    "天亮",
-    "天黑",
-    "夜幕",
-    "黄昏",
-    "清晨",
-    "午夜",
-    "正午",
-    "夜晚",
-    "白天",
-    "晚上",
-    "早晨",
-    "下午",
-    "中午",
-    "街道",
-    "房间",
-    "车站",
-    "站台",
-    "城市",
-    "村庄",
-    "森林",
-    "大海",
-    "天空",
-    "大地",
-    "世界",
-    "战场",
-    "广场",
-    "众人",
-    "两人",
-    "双方",
-    "一人",
-    "三人",
-    "大家",
-    "所有人",
-    "主角",
-    "旁白",
-    "镜头",
-    "画面",
-    "场景",
-    "天气",
-    "故事",
-    "剧情",
-    "情节",
-    "然后",
-    "于是",
-    "但是",
-    "不过",
-    "因为",
-    "所以",
-    "如果",
-    "虽然",
-    "突然",
-    "终于",
-    "毕竟",
-    "居然",
-    "竟然",
-    "我们",
-    "你们",
-    "他们",
-    "她们",
-    "它们",
-    "自己",
-    "彼此",
-)
-_NAME_FOLLOW_RE = re.compile(
-    r"([\u4e00-\u9fa5]{2,3}?)(?=(?:意识到|觉得|认为|坚持|决定|同意|梳理|评估|分析|理解|"
-    r"发现|感到|知道|说道|离开|来到|回到|前往|看着|听见|想起|点头|摇头|沉默|开口|"
-    r"转身|回头|抬头|低头|坐下|起身|推开|关上|拿起|放下|掏出|停下|愣住|怔住|惊醒|"
-    r"醒来|出门|进屋|盘坐|走入|走进|站在|望着|听着|打量|伸手|握住|松开|深吸|叹息|"
-    r"皱眉|轻笑|沉声|低声|高声|忽然|终于|缓缓|慢慢|渐渐|随即|径直|直接|继续|说|道|"
-    r"问|喊|答|在|了|着|过|的|地|得|和|与|跟|，|。|；|！|？|：|,|;|!|\\?|:|$))"
-)
-
-
-def _clean_name_candidate(cand: str) -> str:
-    """剥去候选名尾部的动词/虚词残片（如「林夏在」→「林夏」）。"""
-    base = cand
-    while len(base) > 1 and base.endswith(_NAME_TAIL_NOISE):
-        base = base[:-1]
-    return base
-
-
-def _is_plausible_name(name: str) -> bool:
-    """判断候选名是否像真实角色名（排除代词、动词短语、天气/场景词等非人名）。"""
-    if len(name) < 2:
-        return False
-    if name.startswith(_NAME_PRONOUN_HEADS):
-        return False
-    if name in _NAME_FULL_NOISE:
-        return False
-    if any(name.startswith(h) for h in _NAME_VERB_HEADS):
-        return False
-    return True
-
-
-def _extract_plausible_name(text: str) -> str:
-    """从文本中提取第一个可信角色名；找不到返回空串（宁缺毋滥，绝不乱认）。"""
-    if not text:
-        return ""
-    # 1) 说话者模式：「XX说/道/问/喊…」
-    m = re.search(r"([\u4e00-\u9fa5]{2,4})(?:说道|答道|回答|说|道|问|喊|叫)", text)
-    if m:
-        name = _clean_name_candidate(m.group(1))
-        if _is_plausible_name(name):
-            return name
-    # 2) 通用候选：2~3 字窗口 + 后随动作/虚词/标点
-    for m in _NAME_FOLLOW_RE.finditer(text):
-        name = _clean_name_candidate(m.group(1))
-        if _is_plausible_name(name):
-            return name
-    return ""
 
 
 # =============================================================================
@@ -322,1558 +14,865 @@ def _json_default(obj):
         return obj.name
     if isinstance(obj, set):
         return list(obj)
-    if isinstance(obj, deque):
-        return list(obj)
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
 # =============================================================================
-# SPL 故事原生四阶推理枚举
+# 合同条款分类枚举
 # =============================================================================
-class SPLStage(Enum):
-    STRIP_NARRATIVE = auto()  # 1. 叙事剥离：识别故事元素（伏笔/转折/高潮/铺垫）
-    SCAN_ASSUMPTION = auto()  # 2. 内隐假设：校验人物动机、情节逻辑合理性
-    HEDGE_RISK = auto()  # 3. 脆弱性对冲：识别OOC、逻辑漏洞、节奏问题
-    LOCK_RESPONSIBILITY = auto()  # 4. 责任闭环：输出故事质量评分、可追溯优化
-    RECONSTRUCT = auto()  # 5. 因果重构（第二视角五步因果推理内核）
-
-
-class RiskLevel(Enum):
-    SAFE = auto()
-    WARNING = auto()
-    CRITICAL = auto()
-    FATAL = auto()
-
-
-class NodeStatus(Enum):
-    RAW = auto()
-    STRIPPED = auto()
-    AUDITED = auto()
-    PRUNED = auto()
-    ACTIVE = auto()
-    FROZEN = auto()
-    FORESHADOW = auto()  # 新增：伏笔节点
-    MERGED = auto()  # 新增：合并节点
-
-
-class StoryElementType(Enum):
-    """故事元素分类，叙事剥离阶段自动识别"""
-
-    FORESHADOW = auto()  # 伏笔
-    TURNING_POINT = auto()  # 转折
-    CLIMAX = auto()  # 高潮
-    PADDING = auto()  # 铺垫
-    DIALOGUE = auto()  # 对话
-    ACTION = auto()  # 动作
-    PSYCHOLOGY = auto()  # 心理
-
-
-# =============================================================================
-# 责任闭环锚定层
-# =============================================================================
-@dataclass
-class TraceLog:
-    timestamp: str
-    operation: str
-    stage: SPLStage
-    node_id: Optional[str]
-    remark: str
-    trace_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-
-
-@dataclass
-class ResponsibilityAccount:
-    organization: str
-    role: str
-    stage: str
-    nonce: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    trace_chain: List[str] = field(default_factory=list)
-    story_quality_score: float = 0.0
-
-    def bind_stage(self, spl_stage: SPLStage) -> bool:
-        stage_name = spl_stage.name
-        self.trace_chain.append(f"{stage_name}|{uuid.uuid4().hex[:6]}")
-        return True
-
-
-class LLMProvider(Protocol):
-    def generate(self, prompt: str, **kwargs) -> str: ...
-
-
-# =============================================================================
-# 12维高阶情感耦合动力学
-# 专为故事生成优化：情感耦合、记忆残留、人际传染、阈值触发
-# =============================================================================
-@dataclass
-class EmotionalMemory:
-    """情感记忆单元，保留事件情感残留"""
-
-    event_id: str
-    emotion_vector: Dict[str, float]
-    decay_rate: float = 0.05  # 每步衰减率
-    remaining_strength: float = 1.0
-
-
-@dataclass
-class CharacterPhaseSpace:
-    """
-    12维情感相空间，多轮迭代收敛耦合矩阵
-    适用于复杂情感博弈与人物弧线建模
-    """
-
-    character_name: str
-
-    # 核心情感维度（0~1）
-    attachment: float = 0.5  # 依恋
-    restraint: float = 0.5  # 克制
-    anxiety: float = 0.5  # 焦虑
-    guilt: float = 0.0  # 愧疚
-    desire: float = 0.0  # 欲望
-    resentment: float = 0.0  # 怨恨
-    shame: float = 0.0  # 羞耻
-    longing: float = 0.0  # 思念
-    jealousy: float = 0.0  # 嫉妒
-    relief: float = 0.0  # 释然
-    hope: float = 0.0  # 期待
-    despair: float = 0.0  # 绝望
-
-    # 动力学参数
-    base_damping: float = field(default=0.12)
-    coupling_strength: float = field(default=0.08)  # 情感耦合强度
-    memory_capacity: int = field(default=10)  # 情感记忆容量
-
-    # 情感记忆队列（最近N个事件的情感残留）
-    emotional_memory: deque = field(default_factory=lambda: deque(maxlen=10))
-    # 情感耦合矩阵：A情感对B情感的影响系数
-    COUPLING_MATRIX: Dict[str, Dict[str, float]] = field(
-        default_factory=lambda: {
-            # 焦虑放大欲望、削弱克制
-            "anxiety": {"desire": 0.15, "restraint": -0.2},
-            # 愧疚放大克制、削弱欲望
-            "guilt": {"restraint": 0.25, "desire": -0.3},
-            # 欲望削弱克制、放大焦虑
-            "desire": {"restraint": -0.2, "anxiety": 0.1},
-            # 克制放大愧疚、削弱欲望
-            "restraint": {"guilt": 0.1, "desire": -0.15},
-            # 羞耻放大克制、放大焦虑
-            "shame": {"restraint": 0.3, "anxiety": 0.2},
-            # 依恋放大思念、放大愧疚
-            "attachment": {"longing": 0.2, "guilt": 0.1},
-        }
-    )
-
-    def _get_all_emotion_fields(self) -> List[str]:
-        return [
-            "attachment",
-            "restraint",
-            "anxiety",
-            "guilt",
-            "desire",
-            "resentment",
-            "shame",
-            "longing",
-            "jealousy",
-            "relief",
-            "hope",
-            "despair",
-        ]
-
-    def _apply_coupling(self) -> None:
-        """情感耦合效应：多轮迭代收敛的耦合矩阵"""
-        for source_emo, targets in self.COUPLING_MATRIX.items():
-            source_val = getattr(self, source_emo)
-            for target_emo, coefficient in targets.items():
-                current = getattr(self, target_emo)
-                delta = source_val * coefficient * self.coupling_strength
-                new_val = max(0.001, min(0.999, current + delta))
-                setattr(self, target_emo, round(new_val, 6))
-
-    def _apply_memory_residue(self) -> None:
-        """✨ 新增：情感记忆残留，模拟情绪的延续性"""
-        to_remove = []
-        for mem in self.emotional_memory:
-            mem.remaining_strength *= 1 - mem.decay_rate
-            if mem.remaining_strength < 0.01:
-                to_remove.append(mem)
-                continue
-
-            for emo, val in mem.emotion_vector.items():
-                current = getattr(self, emo)
-                delta = val * mem.remaining_strength * 0.1
-                setattr(self, emo, max(0.001, min(0.999, current + delta)))
-
-        for mem in to_remove:
-            self.emotional_memory.remove(mem)
-
-    def apply_event_impulse(
-        self, impulse: Dict[str, float], event_id: str = "", dt: float = 1.0
-    ) -> Dict[str, float]:
-        """
-        高阶情感动力学方程：
-        dE/dt = -damping*E + 耦合效应 + 记忆残留 + 外部脉冲
-        """
-        old_state = self.to_dict()
-        emo_fields = self._get_all_emotion_fields()
-
-        # 1. 先应用情感耦合
-        self._apply_coupling()
-        # 2. 再应用情感记忆残留
-        self._apply_memory_residue()
-
-        # 3. 应用外部事件脉冲
-        for field in emo_fields:
-            val = getattr(self, field)
-            real_damping = self.base_damping + (0.02 * val)  # 强度越大衰减越快
-            delta = (-real_damping * val + impulse.get(field, 0.0)) * dt
-            new_val = val + delta
-            setattr(self, field, max(0.001, min(0.999, round(new_val, 6))))
-
-        # 4. 记录情感记忆
-        if event_id:
-            self.emotional_memory.append(
-                EmotionalMemory(
-                    event_id=event_id,
-                    emotion_vector={k: impulse.get(k, 0.0) for k in emo_fields},
-                )
-            )
-
-        new_state = self.to_dict()
-        delta_report = {
-            f"delta_{k}": round(new_state[k] - old_state[k], 6) for k in emo_fields
-        }
-        return delta_report
-
-    def calculate_emotional_tension(self) -> float:
-        """✨ 新增：计算当前情感张力，用于剧情节奏控制"""
-        # 矛盾情感差值越大，张力越高（克制vs欲望、愧疚vs依恋）
-        tension = 0.0
-        tension += abs(self.restraint - self.desire) * 2.0  # 核心矛盾：克制vs欲望
-        tension += abs(self.guilt - self.attachment) * 1.5  # 次要矛盾：愧疚vs依恋
-        tension += self.anxiety * 1.0
-        tension += self.shame * 1.2
-        return round(tension, 4)
-
-    def check_threshold_triggers(self) -> List[str]:
-        """✨ 新增：情感阈值触发，自动检测剧情转折点"""
-        triggers = []
-        if self.restraint < 0.2 and self.desire > 0.8:
-            triggers.append("克制力崩溃，欲望突破防线")
-        if self.guilt > 0.9:
-            triggers.append("愧疚感达到极值，主动回避/坦白")
-        if self.despair > 0.85:
-            triggers.append("彻底绝望，关系断裂")
-        if self.hope > 0.8:
-            triggers.append("重燃希望，关系转机")
-        return triggers
-
-    def to_dict(self) -> Dict[str, float]:
-        return {k: round(getattr(self, k), 4) for k in self._get_all_emotion_fields()}
-
-
-# =============================================================================
-# 多因果动态网络系统
-# 支持多父多子、因果传导、分叉合并、伏笔追踪
-# =============================================================================
-@dataclass
-class ImplicitAssumption:
-    content: str
-    confidence: float
-    risk_level: RiskLevel
-    source_node_id: str
-    story_logic_check: str = ""  # 新增：故事逻辑校验结果
-    audit_trace: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
-
-
-@dataclass
-class CausalNode:
-    """
-    多因果动态节点：
-    - 支持多父多子，形成因果网而非链
-    - 支持因果传导系数
-    - 支持伏笔标记与自动回收
-    - 支持多节点合并触发
-    """
-
-    node_id: str
-    character: str
-    raw_narrative: str
-    premise: str
-    conclusion: str
-
-    emotional_impulse: Dict[str, float] = field(default_factory=dict)
-    spatial_mutually_exclusive_tag: Optional[str] = None
-    parent_nodes: List[str] = field(default_factory=list)  # 多父节点
-    child_nodes: List[str] = field(default_factory=list)  # 多子节点
-    causal_conductivity: float = 0.8  # 因果传导系数：父节点势能传导比例
-    merge_required: List[str] = field(
-        default_factory=list
-    )  # 需要哪些父节点全部完成才触发
-
-    implicit_assumptions: List[ImplicitAssumption] = field(default_factory=list)
-    story_element_type: StoryElementType = StoryElementType.ACTION
-    is_foreshadow: bool = False
-    foreshadow_recycle_chapter: Optional[int] = None  # 伏笔回收章节
-
-    status: NodeStatus = NodeStatus.RAW
-    spl_process_stage: Optional[SPLStage] = None
-    priority: int = 0
-    causal_potential: float = 0.0
-    emotional_tension: float = 0.0
-    audit_report: Optional[Dict[str, Any]] = None
-    risk_summary: Dict[str, Any] = field(default_factory=dict)
-
-    def calculate_causal_potential(
-        self, registry: Dict[str, CharacterPhaseSpace]
-    ) -> float:
-        """
-        多因果势能计算：
-        基础情感驱动力 + 父节点传导势能 + 伏笔权重 + 张力加成
-        """
-        space = registry.get(self.character)
-        if not space:
-            self.causal_potential = 1.0
-            return 1.0
-
-        # 1. 基础情感驱动力
-        drive = (
-            space.desire * 0.9
-            + space.resentment * 0.8
-            + space.anxiety * 0.7
-            + space.shame * 0.6
-            + space.attachment * 0.5
-            - space.guilt * 0.4
-            - space.restraint * 0.6
-        )
-
-        # 2. 克制力非线性抑制
-        inhibition = 1.0 - (space.restraint**1.5)
-        base_pot = drive * inhibition + 0.3
-
-        # 3. 父节点传导势能
-        parent_bonus = len(self.parent_nodes) * 0.15
-        # 4. 伏笔权重加成
-        foreshadow_bonus = 0.3 if self.is_foreshadow else 0.0
-        # 5. 情感张力加成
-        tension_bonus = space.calculate_emotional_tension() * 0.5
-
-        # 6. 风险扣减
-        critical_count = sum(
-            1 for a in self.implicit_assumptions if a.risk_level == RiskLevel.CRITICAL
-        )
-        risk_factor = max(0.5, 1.0 - critical_count * 0.15)
-
-        final_pot = round(
-            (base_pot + parent_bonus + foreshadow_bonus + tension_bonus) * risk_factor,
-            6,
-        )
-        self.causal_potential = max(0.01, final_pot)
-        self.emotional_tension = space.calculate_emotional_tension()
-        return self.causal_potential
-
-
-# =============================================================================
-# 章节图 & 全局状态
-# =============================================================================
-@dataclass
-class ChapterGraph:
-    chapter_id: int
-    title: str
-    nodes: Dict[str, CausalNode] = field(default_factory=dict)
-    content: str = ""
-    target_tension: float = 0.6  # 本章目标张力
-    actual_tension: float = 0.0
-    tension_curve: List[float] = field(default_factory=list)  # 本章张力曲线
-    audit_report: Optional[Dict[str, Any]] = None
-    spl_stage_records: List[Dict[str, Any]] = field(default_factory=list)
-    story_quality_score: float = 0.0
-
-
-@dataclass
-class WorldLine:
-    """✨ 新增：多世界线管理"""
-
-    worldline_id: str
-    name: str
-    divergence_point: str  # 分叉节点ID
-    nodes: Dict[str, CausalNode] = field(default_factory=dict)
-    is_active: bool = True
-
-
-@dataclass
-class GlobalCausalState:
-    characters_profile: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    emotional_registry: Dict[str, CharacterPhaseSpace] = field(default_factory=dict)
-    world_rules: Dict[str, Any] = field(default_factory=dict)
-    established_facts: Set[str] = field(default_factory=set)
-    fact_lock: Set[str] = field(default_factory=set)
-    pending_foreshadows: List[CausalNode] = field(default_factory=list)  # 待回收伏笔
-
-    version: int = 0
-    current_chapter: int = 0
-    history_snapshots: List[Dict[str, Any]] = field(default_factory=list)
-    global_risk_pool: Dict[str, RiskLevel] = field(default_factory=dict)
-    worldlines: Dict[str, WorldLine] = field(default_factory=dict)
-    global_tension_curve: List[float] = field(default_factory=list)  # 全书张力曲线
-
-    def add_character(
-        self, name: str, profile: Dict[str, Any], phase: CharacterPhaseSpace
-    ) -> None:
-        self.characters_profile[name] = profile
-        self.emotional_registry[name] = phase
-
-    def lock_fact(self, fact: str) -> None:
-        self.established_facts.add(fact)
-        self.fact_lock.add(fact)
-
-    def save_snapshot(self) -> None:
-        snap = dataclasses.asdict(self)
-        # asdict 将 CausalNode 转为 dict，回滚时无法直接还原；
-        # 额外保留 pending_foreshadows 的深拷贝以供 rollback 使用
-        snap["_pending_foreshadows_deep"] = copy.deepcopy(self.pending_foreshadows)
-        self.history_snapshots.append(snap)
-        if len(self.history_snapshots) > 30:
-            self.history_snapshots.pop(0)
-
-    def rollback(self, idx: int = -1) -> bool:
-        if not self.history_snapshots:
-            return False
-        snap = self.history_snapshots[idx]
-        self.characters_profile = snap["characters_profile"]
-        self.emotional_registry = {
-            k: CharacterPhaseSpace(**v) for k, v in snap["emotional_registry"].items()
-        }
-        self.world_rules = snap["world_rules"]
-        self.established_facts = set(snap["established_facts"])
-        self.fact_lock = set(snap["fact_lock"])
-        # 恢复 pending_foreshadows：使用深拷贝保留 CausalNode 类型信息
-        self.pending_foreshadows = copy.deepcopy(
-            snap.get("_pending_foreshadows_deep", [])
-        )
-        self.global_risk_pool = {
-            k: RiskLevel[v] for k, v in snap["global_risk_pool"].items()
-        }
-        self.current_chapter = snap.get("current_chapter", self.current_chapter)
-        self.global_tension_curve = list(snap.get("global_tension_curve", []))
-        self.version = snap["version"]
-        return True
-
-    def emotional_contagion(
-        self, source: str, target: str, strength: float = 0.3
-    ) -> None:
-        """✨ 新增：人际情感传染，A的情绪影响B"""
-        source_space = self.emotional_registry.get(source)
-        target_space = self.emotional_registry.get(target)
-        if not source_space or not target_space:
-            return
-
-        # 核心情绪传染
-        for emo in ["anxiety", "desire", "guilt", "shame"]:
-            source_val = getattr(source_space, emo)
-            target_val = getattr(target_space, emo)
-            delta = source_val * strength * 0.2
-            setattr(target_space, emo, max(0.001, min(0.999, target_val + delta)))
-
-
-# =============================================================================
-# SPL 第一阶：叙事剥离（故事原生优化）
-# 自动识别故事元素、分类节点类型、标记伏笔
-# =============================================================================
-class NarrativeStripper:
-    def __init__(self, account: ResponsibilityAccount):
-        self.account = account
-        self.stage = SPLStage.STRIP_NARRATIVE
-        self.trace_logs: List[TraceLog] = []
-
-    def _add_log(self, node_id: str, remark: str):
-        log = TraceLog(
-            timestamp=datetime.now().isoformat(),
-            operation="STRIP_NARRATIVE",
-            stage=self.stage,
-            node_id=node_id,
-            remark=remark,
-        )
-        self.trace_logs.append(log)
-
-    def _classify_story_element(self, node: CausalNode) -> StoryElementType:
-        """自动识别故事元素类型"""
-        text = node.raw_narrative + node.premise + node.conclusion
-        if any(k in text for k in ("突然", "没想到", "谁知", "就在这时")):
-            return StoryElementType.TURNING_POINT
-        if any(k in text for k in ("伏笔", "日后", "将来", "多年后")):
-            node.is_foreshadow = True
-            return StoryElementType.FORESHADOW
-        if any(k in text for k in ("高潮", "爆发", "崩溃", "决裂")):
-            return StoryElementType.CLIMAX
-        if any(k in text for k in ("说:", "道:", "问:", "回答")):
-            return StoryElementType.DIALOGUE
-        if any(k in text for k in ("心里", "想", "觉得", "意识到")):
-            return StoryElementType.PSYCHOLOGY
-        return StoryElementType.ACTION
-
-    def strip(self, raw_nodes: List[CausalNode]) -> List[CausalNode]:
-        if not self.account.bind_stage(self.stage):
-            raise PermissionError(f"SPL阶段身份不匹配")
-
-        stripped_list = []
-        for node in raw_nodes:
-            # 故事元素自动分类
-            node.story_element_type = self._classify_story_element(node)
-            node.status = NodeStatus.STRIPPED
-            node.spl_process_stage = self.stage
-
-            # 伏笔登记
-            if node.is_foreshadow:
-                node.status = NodeStatus.FORESHADOW
-                self._add_log(node.node_id, "识别为伏笔节点，已登记待回收")
-
-            stripped_list.append(node)
-            self._add_log(
-                node.node_id, f"叙事剥离完成，分类为{node.story_element_type.name}"
-            )
-
-        return stripped_list
-
-
-# =============================================================================
-# SPL 第二阶：内隐假设透视（故事原生优化）
-# 校验人物动机合理性、情节逻辑连贯性、伏笔有效性
-# =============================================================================
-class ImplicitAssumptionScanner:
-    def __init__(
-        self,
-        account: ResponsibilityAccount,
-        world_rules: Dict[str, Any],
-        sp_engine: Optional["SecondPerspectiveCausalEngine"] = None,
-    ):
-        self.account = account
-        self.stage = SPLStage.SCAN_ASSUMPTION
-        self.world_rules = world_rules
-        self.sp_engine = sp_engine
-        self.trace_logs: List[TraceLog] = []
-
-    def _add_log(self, node_id: str, remark: str):
-        log = TraceLog(
-            timestamp=datetime.now().isoformat(),
-            operation="SCAN_ASSUMPTION",
-            stage=self.stage,
-            node_id=node_id,
-            remark=remark,
-        )
-        self.trace_logs.append(log)
-
-    def _check_character_motivation(
-        self, node: CausalNode, space: CharacterPhaseSpace
-    ) -> Tuple[bool, str]:
-        """校验人物行为是否符合当前情感状态"""
-        conclusion = node.conclusion
-
-        # 高克制角色不会做出冲动行为
-        if space.restraint > 0.7:
-            if any(k in conclusion for k in ("大喊", "追赶", "崩溃", "痛哭")):
-                return False, "高克制状态下做出冲动行为，动机不合理"
-
-        # 低依恋角色不会做出挽留行为
-        if space.attachment < 0.3:
-            if any(k in conclusion for k in ("挽留", "哀求", "道歉")):
-                return False, "低依恋状态下做出挽留行为，动机不合理"
-
-        # 高愧疚角色不会主动亲近
-        if space.guilt > 0.7:
-            if any(k in conclusion for k in ("拥抱", "亲吻", "表白")):
-                return False, "高愧疚状态下做出亲近行为，动机不合理"
-
-        return True, "动机合理"
-
-    def scan(
-        self, nodes: List[CausalNode], emo_reg: Dict[str, CharacterPhaseSpace]
-    ) -> List[CausalNode]:
-        if not self.account.bind_stage(self.stage):
-            raise PermissionError(f"SPL阶段身份不匹配")
-
-        for node in nodes:
-            node.implicit_assumptions.clear()
-            char_space = emo_reg.get(node.character)
-            premise = node.premise
-            conclusion = node.conclusion
-
-            # 1. 时空场景假设
-            if any(
-                k in premise + conclusion
-                for k in ("车站", "站台", "电车", "街道", "房间")
-            ):
-                ass = ImplicitAssumption(
-                    content="场景存在对应物理空间，时空场自洽",
-                    confidence=0.99,
-                    risk_level=RiskLevel.SAFE,
-                    source_node_id=node.node_id,
-                )
-                node.implicit_assumptions.append(ass)
-
-            # 2. 人物动机校验（故事原生核心）
-            if char_space:
-                valid, reason = self._check_character_motivation(node, char_space)
-                risk = RiskLevel.SAFE if valid else RiskLevel.CRITICAL
-                ass = ImplicitAssumption(
-                    content=f"人物动机校验：{reason}",
-                    confidence=0.9 if valid else 0.5,
-                    risk_level=risk,
-                    source_node_id=node.node_id,
-                    story_logic_check=reason,
-                )
-                node.implicit_assumptions.append(ass)
-
-                # 3. 情感行为假设
-                if char_space.restraint > 0.8:
-                    risk = (
-                        RiskLevel.CRITICAL
-                        if char_space.anxiety > 0.7
-                        else RiskLevel.WARNING
-                    )
-                    ass = ImplicitAssumption(
-                        content=f"角色高克制状态下，仍具备情绪调控能力",
-                        confidence=round(char_space.restraint, 2),
-                        risk_level=risk,
-                        source_node_id=node.node_id,
-                    )
-                    node.implicit_assumptions.append(ass)
-
-            # 第二视角五步内核·第二步：内隐假设透视（逆反校验 + 崩溃评估）
-            if self.sp_engine is not None:
-                ev = [
-                    {
-                        "id": node.node_id,
-                        "premise": node.premise,
-                        "conclusion": node.conclusion,
-                        "character": node.character,
-                    }
-                ]
-                chain = self.sp_engine.narrative_stripping(ev)
-                self.sp_engine.implicit_assumption_probe(chain)
-                for a in chain[0].get("assumptions", []):
-                    if a["collapse"] == "INEVITABLE":
-                        node.implicit_assumptions.append(
-                            ImplicitAssumption(
-                                content=f"第二视角逆反校验：{a['content']}（撤除则{a['reverse_check']}）",
-                                confidence=0.85,
-                                risk_level=RiskLevel.CRITICAL,
-                                source_node_id=node.node_id,
-                                story_logic_check="第二视角因果重构：关键预设不可逆撤除",
-                            )
-                        )
-
-            node.status = NodeStatus.AUDITED
-            self._add_log(
-                node.node_id,
-                f"完成逻辑校验，发现{len(node.implicit_assumptions)}条内隐假设",
-            )
-        return nodes
-
-
-# =============================================================================
-# SPL 第三阶：脆弱性对冲（故事原生优化）
-# 识别OOC风险、逻辑漏洞、节奏问题、伏笔遗忘
-# =============================================================================
-class VulnerabilityHedge:
-    def __init__(
-        self,
-        account: ResponsibilityAccount,
-        global_state: GlobalCausalState,
-        sp_engine: Optional["SecondPerspectiveCausalEngine"] = None,
-    ):
-        self.account = account
-        self.stage = SPLStage.HEDGE_RISK
-        self.global_state = global_state
-        self.sp_engine = sp_engine
-        self.trace_logs: List[TraceLog] = []
-        self.risk_threshold = {"warning": 8, "critical": 4, "fatal": 1}
-
-    def _add_log(self, node_id: str, remark: str):
-        log = TraceLog(
-            timestamp=datetime.now().isoformat(),
-            operation="HEDGE_RISK",
-            stage=self.stage,
-            node_id=node_id,
-            remark=remark,
-        )
-        self.trace_logs.append(log)
-
-    def hedge(self, nodes: List[CausalNode]) -> Tuple[List[CausalNode], bool]:
-        if not self.account.bind_stage(self.stage):
-            raise PermissionError(f"SPL阶段身份不匹配")
-
-        total_critical = 0
-        filtered_nodes = []
-        global_fuse = False
-
-        # 检查待回收伏笔
-        pending_foreshadows = self.global_state.pending_foreshadows
-        if pending_foreshadows and len(pending_foreshadows) > 5:
-            self._add_log(
-                "GLOBAL", f"存在{len(pending_foreshadows)}个待回收伏笔，建议尽快回收"
-            )
-
-        for node in nodes:
-            node_risk = defaultdict(int)
-            for ass in node.implicit_assumptions:
-                node_risk[ass.risk_level] += 1
-                if ass.risk_level == RiskLevel.CRITICAL:
-                    total_critical += 1
-
-            node.risk_summary = dict(node_risk)
-
-            # OOC风险直接剔除
-            if node_risk.get(RiskLevel.FATAL, 0) > 0:
-                node.status = NodeStatus.PRUNED
-                self._add_log(node.node_id, "致命OOC风险，预消解剔除")
-                continue
-
-            # 严重逻辑风险标记警告
-            if node_risk.get(RiskLevel.CRITICAL, 0) > 0:
-                self._add_log(node.node_id, "存在严重逻辑风险，建议调整")
-
-            filtered_nodes.append(node)
-            self._add_log(node.node_id, "风险校验通过")
-
-        if total_critical > self.risk_threshold["critical"]:
-            global_fuse = True
-            self.global_state.global_risk_pool["OVER_RISK"] = RiskLevel.FATAL
-            self._add_log("GLOBAL", f"全局风险超标，临界风险总数：{total_critical}")
-
-        # 第二视角五步内核·第三步：脆弱性对冲（崩塌必然判定，非概率）
-        if self.sp_engine is not None:
-            events = [
-                {
-                    "id": n.node_id,
-                    "premise": n.premise,
-                    "conclusion": n.conclusion,
-                    "character": n.character,
-                }
-                for n in nodes
-            ]
-            hedge_report = self.sp_engine.vulnerability_hedge(
-                self.sp_engine.narrative_stripping(events)
-            )
-            verdict = hedge_report["collapse_verdict"]
-            if verdict == "INEVITABLE_COLLAPSE":
-                self._add_log(
-                    "GLOBAL",
-                    f"第二视角崩塌必然判定：{hedge_report['weakest_variable']} 缺失将导致因果链必然崩塌",
-                )
-                global_fuse = True
-                self.global_state.global_risk_pool["SP_COLLAPSE"] = RiskLevel.FATAL
-            elif verdict == "CONDITIONAL_COLLAPSE":
-                self._add_log(
-                    "GLOBAL",
-                    f"第二视角崩塌条件判定：{hedge_report['weakest_variable']} 缺失将条件性崩塌",
-                )
-
-        return filtered_nodes, global_fuse
-
-
-# =============================================================================
-# 多因果拓扑仲裁器（支持合并触发、因果传导、多世界线）
-# =============================================================================
-class CausalIntersectionBroker:
-    def arbitrate_and_prune(
-        self, nodes: List[CausalNode], registry: Dict[str, CharacterPhaseSpace]
-    ) -> List[CausalNode]:
-        # 1. 计算所有节点势能
-        for n in nodes:
-            n.calculate_causal_potential(registry)
-
-        # 2. 互斥节点剪枝
-        conflict_groups = defaultdict(list)
-        for n in nodes:
-            if n.spatial_mutually_exclusive_tag:
-                conflict_groups[n.spatial_mutually_exclusive_tag].append(n)
-
-        pruned_ids: Set[str] = set()
-        for tag, group in conflict_groups.items():
-            if len(group) <= 1:
-                continue
-            group.sort(key=lambda x: (-x.priority, -x.causal_potential))
-            winner = group[0]
-            for loser in group[1:]:
-                loser.status = NodeStatus.PRUNED
-                pruned_ids.add(loser.node_id)
-                print(
-                    f"✂️ 拓扑剪枝 | 互斥标记:{tag} | 保留:{winner.node_id} | 剔除:{loser.node_id}"
-                )
-
-        # 3. 合并节点校验：检查是否所有前置节点都已完成
-        valid_nodes = []
-        for n in nodes:
-            if n.node_id in pruned_ids:
-                continue
-            if n.merge_required:
-                # 检查是否所有合并前置节点都在有效列表中
-                all_merged = all(
-                    p in [x.node_id for x in nodes if x.node_id not in pruned_ids]
-                    for p in n.merge_required
-                )
-                if not all_merged:
-                    n.status = NodeStatus.MERGED
-                    continue
-            valid_nodes.append(n)
-
-        return valid_nodes
-
-
-# =============================================================================
-# 认知审计引擎（故事原生质量评分）
-# =============================================================================
-class StoryQualityAuditEngine:
-    """故事质量审计（原 CognitiveAuditEngine）：情感相空间安全 + 故事质量专项审计。
-
-    已按插件化架构改造：本类作为可复用审计单元，由插件化 CognitiveAuditEngine 注册调用。
-    """
-    def __init__(self, account: ResponsibilityAccount, allowed_stages: List[str]):
-        self.account = account
-        self.allowed_stages = allowed_stages
-        if account.stage not in allowed_stages:
-            raise ValueError("阶段身份校验失败")
-
-    def audit_phase_space_safety(
-        self, registry: Dict[str, CharacterPhaseSpace]
-    ) -> Dict[str, Any]:
-        issues, warns = [], []
-        score = 100.0
-        for name, sp in registry.items():
-            tension = sp.calculate_emotional_tension()
-            triggers = sp.check_threshold_triggers()
-
-            if triggers:
-                warns.append(f"[{name}] 情感阈值触发：{triggers}")
-
-            if (sp.restraint < 0.1 and sp.desire > 0.9) or sp.despair > 0.95:
-                issues.append(f"[{name}] 情感相点击穿极限")
-                score -= 25
-            elif tension > 3.5:
-                warns.append(f"[{name}] 情感张力过高（{tension}），注意节奏")
-                score -= 8
-
-        return {
-            "passed": score >= 60.0,
-            "is_fatal": len(issues) > 0,
-            "issues": issues,
-            "warnings": warns,
-            "score": max(0.0, score),
-        }
-
-    def audit_story_quality(
-        self, chapter: ChapterGraph, nodes: List[CausalNode]
-    ) -> Dict[str, Any]:
-        """✨ 新增：故事质量专项审计"""
-        score = 100.0
-        issues, warns = [], []
-
-        # 节奏评分：张力曲线是否平滑
-        if chapter.tension_curve:
-            tension_variance = sum(
-                (x - sum(chapter.tension_curve) / len(chapter.tension_curve)) ** 2
-                for x in chapter.tension_curve
-            )
-            if tension_variance < 0.1:
-                warns.append("章节张力过于平缓，缺乏节奏变化")
-                score -= 15
-            elif tension_variance > 1.0:
-                warns.append("章节张力波动过大，节奏失控")
-                score -= 10
-
-        # 元素多样性评分
-        element_types = set(n.story_element_type for n in nodes)
-        if len(element_types) < 3:
-            warns.append(f"故事元素过于单一（仅{len(element_types)}种）")
-            score -= 10
-
-        # 伏笔评分
-        foreshadow_count = sum(1 for n in nodes if n.is_foreshadow)
-        if foreshadow_count > 3:
-            warns.append(f"本章伏笔过多（{foreshadow_count}个），注意后续回收")
-            score -= 5
-
-        chapter.story_quality_score = max(0.0, score)
-        return {
-            "score": chapter.story_quality_score,
-            "issues": issues,
-            "warnings": warns,
-            "element_count": len(element_types),
-            "foreshadow_count": foreshadow_count,
-        }
-
-
-# =============================================================================
-# 插件化认知审计引擎（Cognitive Audit Engine 集成）
-# 设计定位：在「第二视角因果与剧情推演」框架下，对决策进行静态诊断与因果重构推演。
-# 核心能力：
-#   1. 责任闭环锚定 —— 将审计绑定到具体的组织/角色/决策阶段，并附防重放 nonce。
-#   2. 静态诊断 —— 通过可插拔的分析插件，提取偏见、脆弱性等风险信号。
-#   3. 因果重构推演 —— 注入修正变量 (delta_vars) 重构逻辑链，并评估系统收敛至目标稳态。
-# 本模块不含任何主观/概率化推测，仅做决定论因果处理。
-# =============================================================================
-class AuditConfigLoader:
-    """审计配置加载器：从字典或 JSON 文件载入审计运行参数（免责声明、允许阶段、自定义字段等）。"""
-    @staticmethod
-    def load_from_dict(config: Dict[str, Any]) -> Dict[str, Any]:
-        return config
-
-    @staticmethod
-    def load_from_json(path: str) -> Dict[str, Any]:
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-
-
-class AuditPlugin:
-    """审计插件：将一个具名分析函数封装为可注册的审计单元。
-
-    Args:
-        name:         插件名称，作为报告中的分析键。
-        analyze_func: 分析函数，接收 decision_context 并返回任意分析结果（通常为含 status 的字典）。
-    """
-
-    def __init__(self, name: str, analyze_func: Callable[[Dict[str, Any]], Any]):
-        self.name = name
-        self.analyze = analyze_func
-
-
-class CognitiveAuditEngine:
-    """认知审计引擎核心（插件化）：负责责任锚定、静态诊断与因果重构推演。
-
-    Args:
-        account: 责任账户（组织/角色/阶段），用于责任闭环锚定。
-        config:  审计配置（免责声明、allowed_stages、custom_fields 等）。
-    """
-
-    def __init__(self, account: ResponsibilityAccount, config: Dict[str, Any]):
-        self.account = account
-        self.config = config
-        self.plugins: List[AuditPlugin] = []
-
-        allowed_stages = self.config.get("allowed_stages", [])
-        if allowed_stages and account.stage not in allowed_stages:
-            raise ValueError(f"Unsupported stage: {account.stage}")
-
-    def register_plugin(self, plugin: AuditPlugin) -> None:
-        self.plugins.append(plugin)
-
-    def audit(self, decision_context: Dict[str, Any]) -> Dict[str, Any]:
-        """静态诊断阶段：提取上下文、遍历注册插件并生成偏见/脆弱性评估报告。"""
-        report = {
-            "disclaimer": self.config.get("disclaimer", ""),
-            "responsibility_account": self.account.__dict__,
-            "analysis": {},
-            "custom_fields": self.config.get("custom_fields", {}),
-        }
-        for plugin in self.plugins:
-            report["analysis"][plugin.name] = plugin.analyze(decision_context)
-        return report
-
-    def reconstruct(
-        self,
-        decision_context: Dict[str, Any],
-        delta_vars: Dict[str, Any],
-        convergence_evaluator: Optional[Callable[[Dict[str, Any], Dict[str, Any]], bool]] = None,
-    ) -> Dict[str, Any]:
-        """因果重构推演算子：
-        1. 注入修正变量 (delta_vars) 重构逻辑链条
-        2. 进行二次反事实校验与审计
-        3. 评估系统是否收敛至目标稳态
-        """
-        reconstructed_context = copy.deepcopy(decision_context)
-        reconstructed_context.update(delta_vars)
-
-        original_report = self.audit(decision_context)
-        reconstructed_report = self.audit(reconstructed_context)
-
-        if convergence_evaluator:
-            is_converged = convergence_evaluator(original_report, reconstructed_report)
-        else:
-            is_converged = self._default_convergence_check(reconstructed_report)
-
-        return {
-            "status": "CONVERGED" if is_converged else "DIVERGED",
-            "delta_variables": delta_vars,
-            "reconstructed_context": reconstructed_context,
-            "reconstructed_report": reconstructed_report,
-            "is_converged": is_converged,
-        }
-
-    @staticmethod
-    def _default_convergence_check(reconstructed_report: Dict[str, Any]) -> bool:
-        """默认判定逻辑：检查重构后的分析插件输出中是否已无高风险或中断状态。"""
-        analysis = reconstructed_report.get("analysis", {})
-        for plugin_name, result in analysis.items():
-            if isinstance(result, dict) and result.get("status") in ["BLOCKED", "HIGH_RISK", "CRITICAL"]:
-                return False
-        return True
-
-
-# =============================================================================
-# 叙事渲染层（情感感知型渲染）
-# =============================================================================
-class MockLLM(LLMProvider):
-    """中性演示渲染器：不依赖任何题材或硬编码角色，仅返回通用占位文本。
-
-    接入真实 LLM（如 DeepSeekProvider）后，可渲染出匹配当前情感张力与
-    故事元素类型的真实文学文本。
-    """
-
-    def generate(self, prompt: str, **kwargs) -> str:
-        return "（演示模式：未接入 LLM）角色的内心随事件推进自然转变，情节在此节点平滑演进。接入 DeepSeekProvider 或任意 LLMProvider 后可渲染出匹配当前情感张力与故事元素类型的真实文学文本。"
-
-
-class DeepSeekProvider(LLMProvider):
-    def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com"):
-        try:
-            from openai import OpenAI
-        except ImportError:
-            raise ImportError("请先执行: pip install openai>=1.0")
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
-        self.default_model = "deepseek-chat"
-
-    def generate(self, prompt: str, **kwargs) -> str:
-        resp = self.client.chat.completions.create(
-            model=kwargs.get("model", self.default_model),
-            messages=[{"role": "user", "content": prompt}],
-            temperature=kwargs.get("temperature", 0.4),
-            max_tokens=kwargs.get("max_tokens", 1000),
-            stream=False,
-        )
-        return resp.choices[0].message.content.strip()
-
-
-class StylisticScribe:
-    def __init__(self, provider: Optional[LLMProvider] = None):
-        self.provider = provider or MockLLM()
-
-    def render_node_to_text(
-        self,
-        node: CausalNode,
-        snapshot: Dict[str, float],
-        profile: Dict[str, Any],
-        tension: float,
-    ) -> str:
-        """✨ 情感感知型渲染，根据张力自动调整文风"""
-        prompt = f"""
-【SPL故事生成强制约束】
-角色档案：{json.dumps(profile, ensure_ascii=False)}
-12维情感坐标：{json.dumps(snapshot, ensure_ascii=False)}
-当前情感张力：{tension}（越高越激烈）
-故事元素类型：{node.story_element_type.name}
-固定前提：{node.premise}
-固定结论：{node.conclusion}
-
-渲染规则：
-1. 严格匹配情感状态，高张力时文风激烈、短句密集；低张力时文风平缓、细节丰富
-2. 严格按 12 维情感坐标与当前张力渲染，不预设任何题材；矛盾情感的拉扯由坐标值自然呈现
-3. 严禁修改剧情、新增事件、突发转折，仅做文学扩写
-4. 150-300字，符合当前张力水平
-"""
-        return self.provider.generate(prompt)
-
-
-# =============================================================================
-# 主引擎：SPL故事生成引擎
-# =============================================================================
-class SPLStoryGenerationEngine:
-    def __init__(
-        self, novel_title: str, init_state: Optional[GlobalCausalState] = None
-    ):
-        self.novel_title = novel_title
-        self.state = init_state or GlobalCausalState()
-        self.chapters: List[ChapterGraph] = []
-
-        self.main_account = ResponsibilityAccount(
-            organization="SPL-Story-Core",
-            role="Story-Generation-Engine",
-            stage=SPLStage.LOCK_RESPONSIBILITY.name,
-        )
-
-        self.sp_engine = SecondPerspectiveCausalEngine()
-        self.stripper = NarrativeStripper(self.main_account)
-        self.scanner = ImplicitAssumptionScanner(
-            self.main_account, self.state.world_rules, self.sp_engine
-        )
-        self.hedger = VulnerabilityHedge(self.main_account, self.state, self.sp_engine)
-        self.broker = CausalIntersectionBroker()
-        self.story_auditor = StoryQualityAuditEngine(
-            self.main_account, [s.name for s in SPLStage]
-        )
-        self.auditor = CognitiveAuditEngine(
-            self.main_account,
-            {
-                "allowed_stages": [s.name for s in SPLStage],
-                "disclaimer": "SPL 故事生成认知审计（插件化 Cognitive Audit Engine）",
-            },
-        )
-        self.auditor.register_plugin(
-            AuditPlugin(
-                "phase_space_safety",
-                lambda ctx: self.story_auditor.audit_phase_space_safety(
-                    ctx["emotional_registry"]
-                )
-                if "emotional_registry" in ctx
-                else {"status": "SKIPPED"},
-            )
-        )
-        self.auditor.register_plugin(
-            AuditPlugin(
-                "story_quality",
-                lambda ctx: self.story_auditor.audit_story_quality(
-                    ctx["chapter"], ctx["nodes"]
-                )
-                if "chapter" in ctx
-                else {"status": "SKIPPED"},
-            )
-        )
-        self.scribe = StylisticScribe()
-
-    def set_llm_provider(self, provider: LLMProvider):
-        self.scribe.provider = provider
-
-    def process_chapter(
-        self,
-        chapter_id: int,
-        title: str,
-        raw_nodes: List[CausalNode],
-        target_tension: float = 0.6,
-        auto_emotional_contagion: bool = True,
-    ) -> ChapterGraph:
-        print(
-            f"\n===== SPL故事生成启动 | 第{chapter_id}章《{title}》 | 目标张力：{target_tension} ====="
-        )
-        self.state.save_snapshot()
-        self.state.current_chapter = chapter_id
-        chapter_graph = ChapterGraph(
-            chapter_id=chapter_id, title=title, target_tension=target_tension
-        )
-
-        try:
-            # 【SPL 1 叙事剥离】
-            print("1/4 执行：叙事剥离 & 故事元素识别")
-            stripped_nodes = self.stripper.strip(raw_nodes)
-            print(
-                f"   识别到：{len([n for n in stripped_nodes if n.is_foreshadow])}个伏笔，{len(set(n.story_element_type for n in stripped_nodes))}种故事元素"
-            )
-
-            # 【SPL 2 内隐假设透视】
-            print("2/4 执行：内隐假设透视 & 人物动机校验")
-            scanned_nodes = self.scanner.scan(
-                stripped_nodes, self.state.emotional_registry
-            )
-            ooc_count = sum(
-                1
-                for n in scanned_nodes
-                for a in n.implicit_assumptions
-                if a.risk_level == RiskLevel.CRITICAL
-            )
-            print(f"   动机校验完成，发现{ooc_count}个潜在OOC风险")
-
-            # 【SPL 3 脆弱性对冲】
-            print("3/4 执行：脆弱性风险对冲")
-            hedged_nodes, fuse_triggered = self.hedger.hedge(scanned_nodes)
-            if fuse_triggered:
-                raise RuntimeError("SPL风控：全局风险超标，触发熔断")
-            print(f"   风险对冲完成，有效节点：{len(hedged_nodes)}个")
-
-            # 多因果拓扑仲裁
-            valid_nodes = self.broker.arbitrate_and_prune(
-                hedged_nodes, self.state.emotional_registry
-            )
-
-            # 双层审计（插件化 CognitiveAuditEngine）
-            rule_audit = self.auditor.audit(
-                {"emotional_registry": self.state.emotional_registry}
-            )["analysis"]["phase_space_safety"]
-            if rule_audit["is_fatal"]:
-                raise RuntimeError(f"情感稳态击穿：{rule_audit['issues']}")
-            if rule_audit["warnings"]:
-                print(f"   情感预警：{rule_audit['warnings']}")
-
-            # 情感动力学迭代 + 文本渲染
-            print("4/4 执行：情感耦合计算 & 张力感知渲染")
-            content_blocks = []
-            tension_curve = []
-
-            for i, node in enumerate(valid_nodes, 1):
-                char_sp = self.state.emotional_registry.get(node.character)
-
-                # 情感传染（可选开启）
-                if auto_emotional_contagion and i > 1:
-                    prev_char = valid_nodes[i - 2].character if i > 1 else None
-                    if prev_char and prev_char != node.character:
-                        self.state.emotional_contagion(prev_char, node.character)
-
-                # 应用事件情感脉冲
-                delta_report = {}
-                if char_sp and node.emotional_impulse:
-                    delta_report = char_sp.apply_event_impulse(
-                        node.emotional_impulse, event_id=node.node_id
-                    )
-
-                # 计算当前张力
-                tension = char_sp.calculate_emotional_tension() if char_sp else 0.5
-                tension_curve.append(tension)
-                chapter_graph.tension_curve = tension_curve
-
-                # 检查情感阈值触发
-                if char_sp:
-                    triggers = char_sp.check_threshold_triggers()
-                    if triggers:
-                        print(f"   ⚡ 情感阈值触发：{node.character} -> {triggers}")
-
-                snap = char_sp.to_dict() if char_sp else {}
-                prof = self.state.characters_profile.get(node.character, {})
-                text = self.scribe.render_node_to_text(node, snap, prof, tension)
-                content_blocks.append(text)
-
-                self.state.established_facts.add(node.conclusion)
-                node.status = NodeStatus.ACTIVE
-                chapter_graph.nodes[node.node_id] = node
-
-                if delta_report:
-                    print(
-                        f"   [{i}/{len(valid_nodes)}] {node.character} 张力：{tension:.2f} | 情感变化：{delta_report}"
-                    )
-
-            # 【SPL 4 责任闭环：故事质量评分 + 第二视角责任锚定】
-            plugin_report = self.auditor.audit(
-                {"chapter": chapter_graph, "nodes": valid_nodes}
-            )
-            quality_audit = plugin_report["analysis"]["story_quality"]
-            chapter_graph.actual_tension = (
-                sum(tension_curve) / len(tension_curve) if tension_curve else 0
-            )
-            sp_events = [
-                {
-                    "id": n.node_id,
-                    "premise": n.premise,
-                    "conclusion": n.conclusion,
-                    "character": n.character,
-                }
-                for n in valid_nodes
-            ]
-            sp_chain = self.sp_engine.narrative_stripping(sp_events)
-            sp_anchors = self.sp_engine.responsibility_anchor(sp_chain)
-            chapter_graph.audit_report = {
-                "emotion_audit": rule_audit,
-                "quality_audit": quality_audit,
-                "responsibility_anchors": sp_anchors,
-                "plugin_audit": plugin_report,
-            }
-
-            # 【SPL 5 因果重构：第二视角五步内核第五步】
-            print("5/5 执行：第二视角因果重构（收敛校验至目标稳态）")
-            self.sp_engine.implicit_assumption_probe(sp_chain)
-            sp_hedge = self.sp_engine.vulnerability_hedge(sp_chain)
-            sp_recon = self.sp_engine.causal_reconstruction(
-                sp_chain, fix_vars=[], target_state="逻辑自洽稳态"
-            )
-            chapter_graph.audit_report["second_perspective"] = {
-                "collapse_verdict": sp_hedge["collapse_verdict"],
-                "weakest_variable": sp_hedge["weakest_variable"],
-                "reconstruction": sp_recon,
-            }
-            if not sp_recon["converged"]:
-                print(f"   ⚠️ 第二视角诊断：{sp_recon['diagnosis']}")
-            self.state.global_tension_curve.extend(tension_curve)
-
-            chapter_graph.content = "\n\n".join(content_blocks)
-            self.state.version += 1
-            self.chapters.append(chapter_graph)
-
-            print(
-                f"✅ 章节生成完成 | 实际张力：{chapter_graph.actual_tension:.2f} | 故事质量分：{quality_audit['score']:.0f}"
-            )
-            print(
-                f"   全书平均张力：{sum(self.state.global_tension_curve) / len(self.state.global_tension_curve):.2f}"
-            )
-            return chapter_graph
-
-        except Exception as e:
-            print(f"❌ SPL故事生成异常：{str(e)}")
-            print("⚠️  已自动回滚到上一个稳定状态")
-            self.state.rollback()
-            raise
-
-    def compile_all(self) -> str:
-        full = f"# 《{self.novel_title}》\n\n"
-        for ch in self.chapters:
-            full += f"## 第{ch.chapter_id}章 {ch.title}\n\n"
-            full += f"*本章张力：{ch.actual_tension:.2f} | 质量分：{ch.story_quality_score:.0f}*\n\n"
-            full += f"{ch.content}\n\n"
-        return full
-
-    def save_engine(self, path: str):
-        data = {
-            "title": self.novel_title,
-            "global_state": dataclasses.asdict(self.state),
-            "chapters": [dataclasses.asdict(c) for c in self.chapters],
-        }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, default=_json_default)
+class ContractClauseType(Enum):
+    """合同条款分类，叙事剥离阶段自动识别"""
+
+    PAYMENT = auto()  # 付款条款
+    ACCEPTANCE = auto()  # 验收条款
+    DELIVERY = auto()  # 交付条款
+    BREACH = auto()  # 违约条款
+    TERMINATION = auto()  # 终止/解除条款
+    LIABILITY = auto()  # 责任/赔偿条款
+    CONFIDENTIALITY = auto()  # 保密条款
+    INTELLECTUAL_PROPERTY = auto()  # 知识产权条款
+    FORCE_MAJEURE = auto()  # 不可抗力条款
+    DISPUTE_RESOLUTION = auto()  # 争议解决条款
+    WARRANTY = auto()  # 保证/质保条款
+    EFFECTIVENESS = auto()  # 生效条款
+    OTHER = auto()  # 其他条款
 
 
 # =============================================================================
 # 第二视角因果推理引擎 V2.1（决定论内核，无概率化推测）
 # 五步算子：叙事剥离 → 内隐假设透视 → 脆弱性对冲 → 责任闭环锚定 → 因果重构
-# 统一供 business / creator 两引擎内联复用（不依赖具体 dataclass 字段）。
+# 企业版：合同审查专用实现。
 # =============================================================================
 class SecondPerspectiveCausalEngine:
     """决定论因果推理：仅做因果链的结构性判定，不输出概率估计。"""
 
-    _COLOCATION_HINTS = [
-        "车站",
-        "站台",
-        "电车",
-        "街道",
-        "房间",
-        "同处",
-        "见面",
-        "相遇",
-        "战场",
-        "广场",
+    # —— 合同审查专用事实字典 ——
+    _CONTRACT_PAYMENT_HINTS = [
+        "付款",
+        "支付",
+        "缴纳",
+        "报酬",
+        "费用",
+        "价款",
+        "结算",
+        "分期付款",
+        "预付款",
+        "尾款",
     ]
-    _MOTION_HINTS = ["追", "跑", "走", "离开", "去", "赶到", "赶来", "冲", "奔"]
-    _COMMS_HINTS = ["发消息", "打电话", "拉黑", "联系", "回复", "微信", "短信", "传讯"]
-    _JUMP_HINTS = ["突然", "莫名", "毫无理由", "不知怎么", "鬼使神差", "突然之间"]
+    _CONTRACT_ACCEPTANCE_HINTS = [
+        "验收",
+        "检验",
+        "测试",
+        "确认",
+        "合格",
+        "达标",
+        "质量标准",
+        "验收标准",
+    ]
+    _CONTRACT_DELIVERY_HINTS = ["交付", "移交", "提交", "运送", "提供", "完成交付"]
+    _CONTRACT_BREACH_HINTS = [
+        "违约",
+        "违反",
+        "未按",
+        "未履行",
+        "逾期",
+        "迟延",
+        "不履行",
+        "怠于",
+    ]
+    _CONTRACT_TERMINATION_HINTS = [
+        "终止",
+        "解除",
+        "撤销",
+        "解除合同",
+        "终止合同",
+        "单方解除",
+    ]
+    _CONTRACT_LIABILITY_HINTS = [
+        "赔偿",
+        "承担责任",
+        "违约金",
+        "损失赔偿",
+        "赔偿金",
+        "连带责任",
+    ]
+    _CONTRACT_CONFIDENTIALITY_HINTS = [
+        "保密",
+        "机密",
+        "泄露",
+        "信息披露",
+        "保密义务",
+        "保密期限",
+    ]
+    _CONTRACT_IP_HINTS = [
+        "知识产权",
+        "专利",
+        "著作权",
+        "商标",
+        "所有权",
+        "使用权",
+        "许可",
+    ]
+    _CONTRACT_FORCE_MAJEURE_HINTS = [
+        "不可抗力",
+        "地震",
+        "战争",
+        "疫情",
+        "自然灾害",
+        "政府行为",
+    ]
+    _CONTRACT_DISPUTE_HINTS = ["争议", "纠纷", "仲裁", "诉讼", "管辖", "管辖权", "法院"]
+    _CONTRACT_NOTICE_HINTS = ["通知", "书面通知", "提前", "通知期限", "告知"]
+    _CONTRACT_LIMITATION_HINTS = [
+        "时效",
+        "诉讼时效",
+        "除斥期间",
+        "期限届满",
+        "时效经过",
+    ]
 
-    # —— 第一步：叙事剥离 ——
-    def narrative_stripping(self, events):
-        """输入 events: List[Dict{premise,conclusion,character,id}]。
-        输出纯因果事件链，并标记悬空结论（结论主体未在前提交代）。"""
+    @classmethod
+    def _classify_clause_type(
+        cls, text: str, conclusion: str = ""
+    ) -> "ContractClauseType":
+        """合同条款类型自动识别。
+        优先按 conclusion（条款核心行为）判定，再按 full text 兜底。
+        优先级：TERMINATION > BREACH > LIABILITY > DISPUTE > FORCE_MAJEURE >
+                ACCEPTANCE > DELIVERY > CONFIDENTIALITY > IP > PAYMENT > OTHER
+        确保交付/违约/终止等特定类型不被 PAYMENT 的前提词遮蔽。"""
+        # 优先检查 conclusion，再检查 full text
+        for source_text in (conclusion, text):
+            if not source_text:
+                continue
+            # 按特定性从高到低检查
+            for hints, clause_type in [
+                (cls._CONTRACT_TERMINATION_HINTS, ContractClauseType.TERMINATION),
+                (cls._CONTRACT_BREACH_HINTS, ContractClauseType.BREACH),
+                (cls._CONTRACT_LIABILITY_HINTS, ContractClauseType.LIABILITY),
+                (cls._CONTRACT_DISPUTE_HINTS, ContractClauseType.DISPUTE_RESOLUTION),
+                (cls._CONTRACT_FORCE_MAJEURE_HINTS, ContractClauseType.FORCE_MAJEURE),
+                (cls._CONTRACT_ACCEPTANCE_HINTS, ContractClauseType.ACCEPTANCE),
+                (cls._CONTRACT_DELIVERY_HINTS, ContractClauseType.DELIVERY),
+                (
+                    cls._CONTRACT_CONFIDENTIALITY_HINTS,
+                    ContractClauseType.CONFIDENTIALITY,
+                ),
+                (cls._CONTRACT_IP_HINTS, ContractClauseType.INTELLECTUAL_PROPERTY),
+                (cls._CONTRACT_PAYMENT_HINTS, ContractClauseType.PAYMENT),
+            ]:
+                for hint in hints:
+                    if hint in source_text:
+                        return clause_type
+            # conclusion 没命中则检查 full text（第二轮循环）
+            if source_text == conclusion:
+                continue
+            break
+        return ContractClauseType.OTHER
+
+    # =====================================================================
+    # 合同审查专用方法（V2 假设探测 + V3 崩溃判定 + V4 责任锚定 + V5 重构）
+    # =====================================================================
+
+    def contract_clause_stripping(self, clauses):
+        """合同条款叙事剥离：识别条款类型、标记前提/结论、检测悬空条款。
+        输入 clauses: List[Dict{id, premise, conclusion, party}]。
+        输出因果事件链，含 clause_type 标记。"""
         chain = []
-        seen_chars = set()
-        for i, ev in enumerate(events):
-            ev = dict(ev)
-            ev.setdefault("id", f"E{i:03d}")
-            ev.setdefault("character", "")
-            premise, conclusion = ev.get("premise", ""), ev.get("conclusion", "")
-            char = ev["character"] or self._infer_character(premise + conclusion)
-            ev["character"] = char
-            dangling = (
-                bool(char)
-                and (i > 0)
-                and (char not in premise)
-                and (char not in seen_chars)
+        seen_parties = set()
+        all_clause_texts = []
+        for i, cl in enumerate(clauses):
+            cl = dict(cl)
+            cl.setdefault("id", f"C{i:03d}")
+            cl.setdefault("party", "")
+            text = cl.get("premise", "") + cl.get("conclusion", "")
+            cl["clause_type"] = self._classify_clause_type(
+                text, cl.get("conclusion", "")
+            ).name
+            party = cl["party"] or self._infer_character(text)
+            cl["character"] = party
+            if party:
+                seen_parties.add(party)
+            all_clause_texts.append(text)
+            chain.append(cl)
+        # 第二轮：检测条款间依赖悬空
+        for i, cl in enumerate(chain):
+            text = cl.get("premise", "") + cl.get("conclusion", "")
+            ct = cl["clause_type"]
+            has_payment = any(h in text for h in self._CONTRACT_PAYMENT_HINTS)
+            has_acceptance = any(
+                h in t
+                for t in all_clause_texts
+                for h in self._CONTRACT_ACCEPTANCE_HINTS
             )
-            if char:
-                seen_chars.add(char)
-            ev["dangling"] = dangling
-            chain.append(ev)
+            has_breach = any(
+                h in t for t in all_clause_texts for h in self._CONTRACT_BREACH_HINTS
+            )
+            has_liability = any(
+                h in t for t in all_clause_texts for h in self._CONTRACT_LIABILITY_HINTS
+            )
+            has_obligation = any(
+                h in t
+                for t in all_clause_texts
+                for h in (
+                    self._CONTRACT_PAYMENT_HINTS
+                    + self._CONTRACT_DELIVERY_HINTS
+                    + self._CONTRACT_CONFIDENTIALITY_HINTS
+                )
+            )
+            has_notice = any(
+                h in t for t in all_clause_texts for h in self._CONTRACT_NOTICE_HINTS
+            )
+            has_dispute = any(
+                h in t for t in all_clause_texts for h in self._CONTRACT_DISPUTE_HINTS
+            )
+            has_force_majeure = any(
+                h in t
+                for t in all_clause_texts
+                for h in self._CONTRACT_FORCE_MAJEURE_HINTS
+            )
+
+            dangling_deps = []
+            if ct == "PAYMENT" and not has_acceptance:
+                dangling_deps.append("PAYMENT_WITHOUT_ACCEPTANCE")
+            if ct == "BREACH" and not has_obligation:
+                dangling_deps.append("BREACH_WITHOUT_OBLIGATION")
+            if ct == "LIABILITY" and not has_breach:
+                dangling_deps.append("LIABILITY_WITHOUT_BREACH")
+            if ct == "TERMINATION" and not has_notice:
+                dangling_deps.append("TERMINATION_WITHOUT_NOTICE")
+            cl["dangling_deps"] = dangling_deps
+            cl["dangling"] = len(dangling_deps) > 0
+            # 全局缺失检测
+            cl["missing_globals"] = []
+            if not has_dispute:
+                cl["missing_globals"].append("DISPUTE_RESOLUTION")
+            if not has_force_majeure:
+                cl["missing_globals"].append("FORCE_MAJEURE")
         return chain
 
-    # —— 第二步：内隐假设透视（逆反校验 + 崩溃评估）——
-    def implicit_assumption_probe(self, chain):
-        for ev in chain:
-            text = ev.get("premise", "") + ev.get("conclusion", "")
+    def contract_assumption_probe(self, chain):
+        """合同假设透视：逆反校验每条条款的内隐前提。
+        付款假设验收标准已定义；违约假设义务条款存在；责任假设违约条款存在。"""
+        all_texts = [cl.get("premise", "") + cl.get("conclusion", "") for cl in chain]
+        all_text_joined = "".join(all_texts)
+        for cl in chain:
+            text = cl.get("premise", "") + cl.get("conclusion", "")
             assumptions = []
-            if any(h in text for h in self._COLOCATION_HINTS):
+            ct = cl.get("clause_type", "OTHER")
+
+            if ct == "PAYMENT":
+                has_acceptance = any(
+                    h in all_text_joined for h in self._CONTRACT_ACCEPTANCE_HINTS
+                )
                 assumptions.append(
                     {
-                        "content": "角色共处同一物理时空，场景自洽",
-                        "reverse_check": "撤除：角色不在同一时空 → 位移类行为失去前提",
-                        "collapse": "INEVITABLE"
-                        if any(
-                            m in ev.get("conclusion", "") for m in self._MOTION_HINTS
-                        )
-                        else "STABLE",
+                        "content": "付款义务以验收合格为前提",
+                        "reverse_check": "撤除验收条款 -> 付款条件无判定标准，义务触发节点缺失",
+                        "collapse": "INEVITABLE" if not has_acceptance else "STABLE",
                     }
                 )
-            if any(h in text for h in self._COMMS_HINTS):
+                has_delivery = any(
+                    h in all_text_joined for h in self._CONTRACT_DELIVERY_HINTS
+                )
                 assumptions.append(
                     {
-                        "content": "角色间存在生效的通讯连接手段",
-                        "reverse_check": "撤除：无通讯手段 → 通讯类行为不成立",
-                        "collapse": "INEVITABLE"
-                        if any(h in ev.get("conclusion", "") for h in self._COMMS_HINTS)
-                        else "STABLE",
+                        "content": "付款以交付完成为时序前提",
+                        "reverse_check": "撤除交付条款 -> 付款时序无法确定，先付后付无据",
+                        "collapse": "CONDITIONAL" if not has_delivery else "STABLE",
                     }
                 )
-            ev["assumptions"] = assumptions
+
+            if ct == "BREACH":
+                has_obligation = (
+                    any(h in all_text_joined for h in self._CONTRACT_PAYMENT_HINTS)
+                    or any(h in all_text_joined for h in self._CONTRACT_DELIVERY_HINTS)
+                    or any(
+                        h in all_text_joined
+                        for h in self._CONTRACT_CONFIDENTIALITY_HINTS
+                    )
+                )
+                assumptions.append(
+                    {
+                        "content": "违约以有效义务条款存在为前提",
+                        "reverse_check": "撤除义务条款 -> 违约判定无基准，责任真空",
+                        "collapse": "INEVITABLE" if not has_obligation else "STABLE",
+                    }
+                )
+
+            if ct == "LIABILITY":
+                has_breach = any(
+                    h in all_text_joined for h in self._CONTRACT_BREACH_HINTS
+                )
+                assumptions.append(
+                    {
+                        "content": "赔偿责任以违约事实成立为前提",
+                        "reverse_check": "撤除违约条款 -> 赔偿无触发条件，责任链断裂",
+                        "collapse": "INEVITABLE" if not has_breach else "STABLE",
+                    }
+                )
+
+            if ct == "TERMINATION":
+                has_notice = any(
+                    h in all_text_joined for h in self._CONTRACT_NOTICE_HINTS
+                )
+                assumptions.append(
+                    {
+                        "content": "终止权以通知程序为行使前提",
+                        "reverse_check": "撤除通知条款 -> 终止程序缺失，单方终止无程序保障",
+                        "collapse": "INEVITABLE" if not has_notice else "STABLE",
+                    }
+                )
+
+            if ct == "CONFIDENTIALITY":
+                has_scope = any(h in text for h in ("范围", "期限", "期间", "地域"))
+                assumptions.append(
+                    {
+                        "content": "保密义务以范围和期限明确为可执行前提",
+                        "reverse_check": "撤除范围/期限 -> 保密义务无边无际，无法执行",
+                        "collapse": "CONDITIONAL" if not has_scope else "STABLE",
+                    }
+                )
+
+            if ct == "DISPUTE_RESOLUTION":
+                has_jurisdiction = any(
+                    h in text for h in ("管辖", "法院", "仲裁机构", "仲裁地")
+                )
+                assumptions.append(
+                    {
+                        "content": "争议解决以管辖/仲裁约定明确为前提",
+                        "reverse_check": "撤除管辖约定 -> 争议解决无机构，程序悬空",
+                        "collapse": "INEVITABLE" if not has_jurisdiction else "STABLE",
+                    }
+                )
+
+            # 时效检测
+            has_limitation = any(
+                h in all_text_joined for h in self._CONTRACT_LIMITATION_HINTS
+            )
+            if ct in ("LIABILITY", "BREACH") and not has_limitation:
+                assumptions.append(
+                    {
+                        "content": "违约/责任条款应约定诉讼时效或适用法定时效",
+                        "reverse_check": "撤除时效约定 -> 权利行使期限不明，时效风险",
+                        "collapse": "CONDITIONAL",
+                    }
+                )
+
+            cl["assumptions"] = assumptions
         return chain
 
-    # —— 第三步：脆弱性对冲（崩塌必然判定，三档非概率）——
-    def vulnerability_hedge(self, chain):
+    def contract_vulnerability_hedge(self, chain):
+        """合同崩溃判定：责任真空=INEVITABLE，条款冲突=CONDITIONAL，时效缺失=CONDITIONAL。
+        非概率判定，仅做结构性二元事实校验。"""
         weakest, weakest_score = None, -1.0
-        for ev in chain:
-            frag = sum(
-                1 for a in ev.get("assumptions", []) if a["collapse"] == "INEVITABLE"
-            )
-            if ev.get("dangling"):
-                frag += 2
-            ev["fragility"] = frag
+        global_missing = set()
+        for cl in chain:
+            frag = 0
+            for dep in cl.get("dangling_deps", []):
+                if (
+                    dep.endswith("WITHOUT_OBLIGATION")
+                    or dep.endswith("WITHOUT_BREACH")
+                    or dep.endswith("WITHOUT_NOTICE")
+                ):
+                    frag += 3  # 责任真空 = 必然崩溃
+                else:
+                    frag += 1  # 条件缺失 = 条件性崩溃
+            for a in cl.get("assumptions", []):
+                if a["collapse"] == "INEVITABLE":
+                    frag += 3
+                elif a["collapse"] == "CONDITIONAL":
+                    frag += 1
+            for missing in cl.get("missing_globals", []):
+                global_missing.add(missing)
+                frag += 1
+            cl["fragility"] = frag
             if frag > weakest_score:
-                weakest_score, weakest = frag, ev
-        if weakest is None:
+                weakest_score, weakest = frag, cl
+
+        # 全局缺失扣分
+        global_frag = len(global_missing) * 2
+
+        if weakest is None and not global_missing:
             verdict = "STABLE"
-        elif weakest_score >= 2:
+        elif weakest_score >= 3 or global_frag >= 4:
             verdict = "INEVITABLE_COLLAPSE"
-        elif weakest_score == 1:
+        elif weakest_score >= 1 or global_frag >= 2:
             verdict = "CONDITIONAL_COLLAPSE"
         else:
             verdict = "STABLE"
+
         return {
             "weakest_variable": weakest["id"] if weakest else None,
-            "weakest_event": weakest,
+            "weakest_clause": weakest,
+            "weakest_clause_type": weakest["clause_type"] if weakest else None,
             "collapse_verdict": verdict,
+            "global_missing": list(global_missing),
             "chain_fragility": [
-                {"id": e["id"], "fragility": e.get("fragility", 0)} for e in chain
+                {
+                    "id": cl["id"],
+                    "clause_type": cl.get("clause_type"),
+                    "fragility": cl.get("fragility", 0),
+                    "dangling_deps": cl.get("dangling_deps", []),
+                }
+                for cl in chain
             ],
         }
 
-    # —— 第四步：责任闭环锚定（最小决策单元 / 责任节点）——
-    def responsibility_anchor(self, chain):
+    def contract_responsibility_anchor(self, chain):
+        """合同责任闭环锚定：每条条款的责任主体、义务指向、最小决策单元。"""
         anchors = []
-        for idx, ev in enumerate(chain):
-            char = ev.get("character", "")
-            action = self._extract_action(ev.get("conclusion", ""))
+        for idx, cl in enumerate(chain):
+            party = cl.get("party", "") or cl.get("character", "")
+            clause_type = cl.get("clause_type", "OTHER")
+            conclusion = cl.get("conclusion", "")
+            action = self._extract_contract_action(conclusion, clause_type)
+            counterparty = cl.get("counterparty", "")
             anchors.append(
                 {
-                    "event_id": ev["id"],
+                    "clause_id": cl["id"],
                     "position": idx,
-                    "accountable": char,
-                    "decision_unit": f"{char}→{action}" if char else action,
-                    "premise": ev.get("premise", ""),
-                    "conclusion": ev.get("conclusion", ""),
+                    "clause_type": clause_type,
+                    "accountable": party,
+                    "counterparty": counterparty,
+                    "decision_unit": f"{party}->{action}" if party else action,
+                    "premise": cl.get("premise", ""),
+                    "conclusion": cl.get("conclusion", ""),
                 }
             )
         return anchors
 
-    # —— 第五步：因果重构（注入修正变量，校验收敛至目标稳态）——
-    def causal_reconstruction(self, chain, fix_vars, target_state):
+    def contract_causal_reconstruction(
+        self, chain, fix_vars, target_state="合同因果自洽"
+    ):
+        """合同因果重构：注入修正变量（补充条款），校验收敛。"""
         fixed_ids = set()
-        for ev in chain:
+        for cl in chain:
             for fix in fix_vars or []:
-                if ev["id"] == fix.get("target_id") or fix.get("apply_to") == "all":
-                    ev["premise"] = (
-                        ev["premise"] + "；" + fix.get("adds_premise", "")
+                if cl["id"] == fix.get("target_id") or fix.get("apply_to") == "all":
+                    cl["premise"] = (
+                        cl.get("premise", "") + "；" + fix.get("adds_premise", "")
                     ).strip("；")
-                    ev["dangling"] = False
-                    fixed_ids.add(ev["id"])
+                    cl["dangling"] = False
+                    cl["dangling_deps"] = []
+                    fixed_ids.add(cl["id"])
         residual = []
-        for ev in chain:
-            if ev.get("dangling") and ev["id"] not in fixed_ids:
-                residual.append(f"事件{ev['id']}结论缺前提支撑")
-            for a in ev.get("assumptions", []):
+        for cl in chain:
+            for dep in cl.get("dangling_deps", []):
+                if cl["id"] not in fixed_ids:
+                    residual.append(
+                        f"条款{cl['id']}({cl.get('clause_type', '')})依赖悬空：{dep}"
+                    )
+            for a in cl.get("assumptions", []):
                 if a["collapse"] == "INEVITABLE" and not fix_vars:
-                    residual.append(f"事件{ev['id']}关键预设不可逆撤除")
+                    residual.append(f"条款{cl['id']}关键预设不可逆撤除：{a['content']}")
         if residual:
             return {
                 "converged": False,
-                "diagnosis": "[中断：因果链未收敛] " + "；".join(residual),
+                "diagnosis": "[中断：合同因果链未收敛] " + "；".join(residual),
                 "fixed_ids": list(fixed_ids),
+                "suggested_fixes": self._suggest_contract_fixes(chain),
             }
         return {
             "converged": True,
             "target_state": target_state,
-            "diagnosis": f"因果链收敛至目标稳态：{target_state}",
+            "diagnosis": f"合同因果链收敛至目标稳态：{target_state}",
             "fixed_ids": list(fixed_ids),
         }
 
+    def _extract_contract_action(self, conclusion: str, clause_type: str) -> str:
+        """提取合同条款中的核心行为动词。"""
+        type_to_hints = {
+            "PAYMENT": self._CONTRACT_PAYMENT_HINTS,
+            "ACCEPTANCE": self._CONTRACT_ACCEPTANCE_HINTS,
+            "DELIVERY": self._CONTRACT_DELIVERY_HINTS,
+            "BREACH": self._CONTRACT_BREACH_HINTS,
+            "TERMINATION": self._CONTRACT_TERMINATION_HINTS,
+            "LIABILITY": self._CONTRACT_LIABILITY_HINTS,
+            "CONFIDENTIALITY": self._CONTRACT_CONFIDENTIALITY_HINTS,
+            "INTELLECTUAL_PROPERTY": self._CONTRACT_IP_HINTS,
+            "FORCE_MAJEURE": self._CONTRACT_FORCE_MAJEURE_HINTS,
+            "DISPUTE_RESOLUTION": self._CONTRACT_DISPUTE_HINTS,
+        }
+        hints = type_to_hints.get(clause_type, [])
+        for h in hints:
+            if h in conclusion:
+                return h
+        return conclusion[:15]
+
+    def _suggest_contract_fixes(self, chain) -> List[Dict[str, str]]:
+        """根据悬空依赖生成补充条款建议。"""
+        suggestions = []
+        for cl in chain:
+            for dep in cl.get("dangling_deps", []):
+                if dep == "PAYMENT_WITHOUT_ACCEPTANCE":
+                    suggestions.append(
+                        {
+                            "target_id": cl["id"],
+                            "fix_type": "ADD_ACCEPTANCE_CLAUSE",
+                            "adds_premise": "补充验收条款：明确验收标准、验收期限、不合格处理方式",
+                        }
+                    )
+                elif dep == "BREACH_WITHOUT_OBLIGATION":
+                    suggestions.append(
+                        {
+                            "target_id": cl["id"],
+                            "fix_type": "ADD_OBLIGATION_CLAUSE",
+                            "adds_premise": "补充义务条款：明确付款/交付/保密等具体义务内容及履行标准",
+                        }
+                    )
+                elif dep == "LIABILITY_WITHOUT_BREACH":
+                    suggestions.append(
+                        {
+                            "target_id": cl["id"],
+                            "fix_type": "ADD_BREACH_CLAUSE",
+                            "adds_premise": "补充违约条款：明确违约情形认定、违约金计算方式",
+                        }
+                    )
+                elif dep == "TERMINATION_WITHOUT_NOTICE":
+                    suggestions.append(
+                        {
+                            "target_id": cl["id"],
+                            "fix_type": "ADD_NOTICE_CLAUSE",
+                            "adds_premise": "补充通知条款：明确通知方式、提前期限、送达地址",
+                        }
+                    )
+            for missing in cl.get("missing_globals", []):
+                if missing == "DISPUTE_RESOLUTION":
+                    suggestions.append(
+                        {
+                            "target_id": "GLOBAL",
+                            "fix_type": "ADD_DISPUTE_CLAUSE",
+                            "adds_premise": "补充争议解决条款：约定管辖法院或仲裁机构",
+                        }
+                    )
+                elif missing == "FORCE_MAJEURE":
+                    suggestions.append(
+                        {
+                            "target_id": "GLOBAL",
+                            "fix_type": "ADD_FORCE_MAJEURE_CLAUSE",
+                            "adds_premise": "补充不可抗力条款：定义范围、通知义务、免责范围",
+                        }
+                    )
+        return suggestions
+
     # —— 内部工具 ——
     def _infer_character(self, text):
-        """兜底角色推断：仅接受可信人名候选；场景/天气/动词短语（如「下雨了」）不再被误认为角色名。"""
-        return _extract_plausible_name(text)
-
-    def _extract_action(self, conclusion):
-        for w in self._MOTION_HINTS + self._COMMS_HINTS:
-            if w in conclusion:
-                return w
-        return conclusion[:12]
+        """兜底角色推断：当事件未显式声明 character 时，提取首个 2-3 字中文名候选。"""
+        m = re.search(r"([\u4e00-\u9fa5]{2,3})", text)
+        return m.group(1) if m else ""
 
 
 # =============================================================================
-# 通用叙事一致性审计演示（题材中性）
+# 结构性修复引擎 V5
+# 解决条款缺失等结构性问题（非表层词替换）
+# =============================================================================
+class StructuralRepairEngine:
+    """结构性修复：条款缺失补全。"""
+
+    def __init__(self, sp_engine: SecondPerspectiveCausalEngine):
+        self.sp_engine = sp_engine
+        self.repair_logs: List[Dict[str, Any]] = []
+
+    def _log(self, repair_type: str, target_id: str, detail: str, action: str):
+        self.repair_logs.append(
+            {
+                "repair_type": repair_type,
+                "target_id": target_id,
+                "detail": detail,
+                "action": action,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
+    def repair_contract_gaps(self, chain, hedge_report) -> List[Dict]:
+        """合同条款缺失修复：根据崩溃报告生成补充条款建议。"""
+        fixes = []
+        for item in hedge_report.get("chain_fragility", []):
+            for dep in item.get("dangling_deps", []):
+                if dep == "PAYMENT_WITHOUT_ACCEPTANCE":
+                    fixes.append(
+                        {
+                            "target_id": item["id"],
+                            "fix_type": "ADD_ACCEPTANCE_CLAUSE",
+                            "adds_premise": "乙方应于交付后15个工作日内完成验收，验收标准以附件技术规格书为准",
+                        }
+                    )
+                elif dep == "BREACH_WITHOUT_OBLIGATION":
+                    fixes.append(
+                        {
+                            "target_id": item["id"],
+                            "fix_type": "ADD_OBLIGATION_CLAUSE",
+                            "adds_premise": "甲方义务：按约定时间支付款项；乙方义务：按约定标准交付成果",
+                        }
+                    )
+                elif dep == "LIABILITY_WITHOUT_BREACH":
+                    fixes.append(
+                        {
+                            "target_id": item["id"],
+                            "fix_type": "ADD_BREACH_CLAUSE",
+                            "adds_premise": "任何一方未按约履行义务即构成违约，违约金按合同总额10%计算",
+                        }
+                    )
+                elif dep == "TERMINATION_WITHOUT_NOTICE":
+                    fixes.append(
+                        {
+                            "target_id": item["id"],
+                            "fix_type": "ADD_NOTICE_CLAUSE",
+                            "adds_premise": "解除方应提前30日书面通知对方，通知送达后合同方可解除",
+                        }
+                    )
+        for missing in hedge_report.get("global_missing", []):
+            if missing == "DISPUTE_RESOLUTION":
+                fixes.append(
+                    {
+                        "target_id": "GLOBAL",
+                        "fix_type": "ADD_DISPUTE_CLAUSE",
+                        "adds_premise": "因本合同产生的争议，双方应友好协商；协商不成的，提交合同签订地人民法院诉讼解决",
+                    }
+                )
+            elif missing == "FORCE_MAJEURE":
+                fixes.append(
+                    {
+                        "target_id": "GLOBAL",
+                        "fix_type": "ADD_FORCE_MAJEURE_CLAUSE",
+                        "adds_premise": "因不可抗力导致无法履行的，遭遇方应在15日内书面通知对方并提供证明，可部分或全部免除责任",
+                    }
+                )
+        for fix in fixes:
+            self._log(
+                "REPAIR_CONTRACT_GAP",
+                fix["target_id"],
+                f"补充条款建议：{fix['fix_type']}",
+                fix["adds_premise"],
+            )
+        return fixes
+
+
+# =============================================================================
+# 合同审查主管线
+# SPL四阶段 + 第二视角五步内核，面向企业合同文书审查场景
+# =============================================================================
+class ContractReviewEngine:
+    """企业合同文书审查引擎：条款因果链构建 -> 假设透视 -> 崩溃判定 -> 责任锚定 -> 重构建议。"""
+
+    def __init__(self, contract_title: str = ""):
+        self.contract_title = contract_title
+        self.sp_engine = SecondPerspectiveCausalEngine()
+        self.repair_engine = StructuralRepairEngine(self.sp_engine)
+        self.established_facts: Set[str] = set()
+        self.review_history: List[Dict[str, Any]] = []
+
+    def review(
+        self,
+        clauses: List[Dict[str, str]],
+        established_facts: Optional[Set[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        审查合同条款列表。
+        输入 clauses: List[Dict{id, premise, conclusion, party, counterparty}]。
+        返回完整审计报告。
+        """
+        if established_facts:
+            self.established_facts = established_facts
+
+        print(
+            f"\n===== 合同审查启动 | 《{self.contract_title}》 | 条款数：{len(clauses)} ====="
+        )
+
+        # 【SPL 1 叙事剥离：条款类型识别 + 依赖检测】
+        print("1/5 执行：条款叙事剥离 & 类型识别")
+        chain = self.sp_engine.contract_clause_stripping(clauses)
+        type_dist = defaultdict(int)
+        for cl in chain:
+            type_dist[cl["clause_type"]] += 1
+        print(f"   条款类型分布：{dict(type_dist)}")
+        dangling_count = sum(1 for cl in chain if cl.get("dangling"))
+        print(f"   依赖悬空条款：{dangling_count}个")
+
+        # 【SPL 2 内隐假设透视：逆反校验】
+        print("2/5 执行：内隐假设透视 & 逆反校验")
+        chain = self.sp_engine.contract_assumption_probe(chain)
+        inevitable_count = sum(
+            1
+            for cl in chain
+            for a in cl.get("assumptions", [])
+            if a["collapse"] == "INEVITABLE"
+        )
+        print(f"   不可逆假设：{inevitable_count}个")
+
+        # 【SPL 3 脆弱性对冲：崩溃判定】
+        print("3/5 执行：脆弱性对冲 & 崩溃判定")
+        hedge_report = self.sp_engine.contract_vulnerability_hedge(chain)
+        verdict = hedge_report["collapse_verdict"]
+        print(f"   崩溃判定：{verdict}")
+        if hedge_report.get("global_missing"):
+            print(f"   全局缺失条款：{hedge_report['global_missing']}")
+
+        # 【SPL 4 责任闭环锚定】
+        print("4/5 执行：责任闭环锚定")
+        anchors = self.sp_engine.contract_responsibility_anchor(chain)
+        print(f"   责任锚点：{len(anchors)}个")
+
+        # 【V5 结构性修复：补充条款建议】
+        print("5/5 执行：结构性修复 & 补充建议")
+
+        # 保存修复前状态快照（供报告使用，reconstruction 会原地修改 chain）
+        pre_fix_dangling = [
+            {
+                "id": cl["id"],
+                "type": cl["clause_type"],
+                "deps": list(cl.get("dangling_deps", [])),
+            }
+            for cl in chain
+            if cl.get("dangling")
+        ]
+        pre_fix_assumptions = [
+            {
+                "id": cl["id"],
+                "type": cl["clause_type"],
+                "inevitable": [
+                    a
+                    for a in cl.get("assumptions", [])
+                    if a["collapse"] == "INEVITABLE"
+                ],
+                "conditional": [
+                    a
+                    for a in cl.get("assumptions", [])
+                    if a["collapse"] == "CONDITIONAL"
+                ],
+            }
+            for cl in chain
+            if cl.get("assumptions")
+        ]
+
+        suggested_fixes = self.sp_engine._suggest_contract_fixes(chain)
+        repair_fixes = self.repair_engine.repair_contract_gaps(chain, hedge_report)
+        # 去重：按 (target_id, fix_type) 合并
+        seen_fixes = set()
+        all_fixes = []
+        for fix in suggested_fixes + repair_fixes:
+            key = (fix.get("target_id", ""), fix.get("fix_type", ""))
+            if key not in seen_fixes:
+                seen_fixes.add(key)
+                all_fixes.append(fix)
+        if all_fixes:
+            print(f"   修复建议：{len(all_fixes)}条")
+
+        # 【第二视角五步内核：因果重构收敛校验】
+        sp_recon = self.sp_engine.contract_causal_reconstruction(
+            chain, fix_vars=all_fixes, target_state="合同因果自洽"
+        )
+        if not sp_recon["converged"]:
+            print(f"   ⚠️ {sp_recon['diagnosis']}")
+        else:
+            print(f"   ✅ {sp_recon['diagnosis']}")
+
+        # 生成审计报告（使用修复前快照）
+        report = {
+            "contract_title": self.contract_title,
+            "clause_count": len(clauses),
+            "clause_type_distribution": dict(type_dist),
+            "dangling_clauses": pre_fix_dangling,
+            "assumption_issues": pre_fix_assumptions,
+            "collapse_verdict": verdict,
+            "weakest_clause": hedge_report.get("weakest_clause_type"),
+            "global_missing": hedge_report.get("global_missing", []),
+            "responsibility_anchors": anchors,
+            "repair_suggestions": all_fixes,
+            "repair_logs": self.repair_engine.repair_logs,
+            "reconstruction": sp_recon,
+            "overall_passed": sp_recon["converged"]
+            and verdict != "INEVITABLE_COLLAPSE",
+        }
+        self.review_history.append(report)
+        return report
+
+    def save_report(self, report: Dict[str, Any], path: str):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2, default=_json_default)
+
+
+# =============================================================================
+# 合同文书审查演示
 # =============================================================================
 if __name__ == "__main__":
     import sys
 
-    for conflict in check_engine_isolation():
-        print(f"⚠️ {conflict}")
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
 
-    # 初始化中性世界观（无题材预设）
-    init_state = GlobalCausalState(
-        world_rules={
-            "张力预警阈值": 3.5,
-            "动机冲突阈值": 0.7,
-        }
-    )
+    print("#" * 60)
+    print("# 合同文书审查 · 演示")
+    print("#" * 60)
 
-    # 角色 A：理性克制型
-    init_state.add_character(
-        "林夏",
-        {"身份": "工程师", "人设": "理性克制"},
-        CharacterPhaseSpace(
-            "林夏",
-            attachment=0.6,
-            restraint=0.8,
-            anxiety=0.3,
-            guilt=0.1,
-            desire=0.4,
-            shame=0.2,
-        ),
-    )
+    contract_engine = ContractReviewEngine("软件开发外包合同（审查样例）")
 
-    # 角色 B：温和坚定型
-    init_state.add_character(
-        "周舟",
-        {"身份": "医生", "人设": "温和坚定"},
-        CharacterPhaseSpace(
-            "周舟",
-            attachment=0.7,
-            restraint=0.5,
-            anxiety=0.4,
-            guilt=0.2,
-            desire=0.3,
-            shame=0.1,
-        ),
-    )
+    # 模拟合同条款：故意缺少验收条款和争议解决条款，制造依赖悬空和全局缺失
+    contract_clauses = [
+        {
+            "id": "C001",
+            "party": "甲方",
+            "counterparty": "乙方",
+            "premise": "甲方委托乙方开发软件系统，双方签订本合同",
+            "conclusion": "甲方应在合同签订后10日内支付预付款30%",
+        },
+        {
+            "id": "C002",
+            "party": "乙方",
+            "counterparty": "甲方",
+            "premise": "甲方支付预付款后，乙方开始系统开发",
+            "conclusion": "乙方应在90个工作日内完成系统交付",
+        },
+        {
+            "id": "C003",
+            "party": "甲方",
+            "counterparty": "乙方",
+            "premise": "乙方完成交付后",
+            "conclusion": "甲方应在15日内支付尾款70%",
+        },
+        {
+            "id": "C004",
+            "party": "双方",
+            "counterparty": "违约方",
+            "premise": "任何一方未按约定履行义务",
+            "conclusion": "违约方应向守约方支付违约金，并赔偿因此造成的损失",
+        },
+        {
+            "id": "C005",
+            "party": "甲方",
+            "counterparty": "乙方",
+            "premise": "乙方逾期交付超过30日",
+            "conclusion": "甲方有权单方解除合同，并要求乙方退还已付款项",
+        },
+        {
+            "id": "C006",
+            "party": "双方",
+            "counterparty": "泄露方",
+            "premise": "双方在合作期间获取的对方商业信息",
+            "conclusion": "双方负有保密义务，不得向第三方披露",
+        },
+    ]
 
-    # 启动 SPL 故事引擎
-    engine = SPLStoryGenerationEngine("示例：叙事一致性审计", init_state)
-    # engine.set_llm_provider(DeepSeekProvider("你的API_KEY"))
+    report = contract_engine.review(contract_clauses)
 
-    # 第一章：分歧与选择
-    node1 = CausalNode(
-        node_id="LX_001",
-        character="林夏",
-        raw_narrative="方案评审会上，林夏与周舟对技术路线产生分歧",
-        premise="林夏坚持采用自研方案，周舟主张引入成熟方案",
-        conclusion="林夏摆出数据，坚持己见，情绪开始紧绷",
-        emotional_impulse={"anxiety": 0.15, "restraint": -0.05},
-    )
-
-    node2 = CausalNode(
-        node_id="ZZ_001",
-        character="周舟",
-        raw_narrative="周舟察觉林夏的紧绷，放缓语气",
-        premise="周舟注意到林夏语速加快、态度强硬",
-        conclusion="他没有反驳，只是重新梳理了两套方案的利弊",
-        emotional_impulse={"attachment": 0.1, "restraint": 0.05},
-    )
-
-    node3 = CausalNode(
-        node_id="LX_002",
-        character="林夏",
-        raw_narrative="林夏意识到自己的固执，态度软化",
-        premise="林夏听完周舟的梳理，发现自己忽略了成本因素",
-        conclusion="她沉默片刻，同意纳入第三方评审再定",
-        emotional_impulse={"anxiety": -0.2, "guilt": 0.1, "attachment": 0.1},
-    )
-
-    engine.process_chapter(
-        chapter_id=1,
-        title="分歧与选择",
-        raw_nodes=[node1, node2, node3],
-        target_tension=0.5,
-    )
-
-    print("\n" + "=" * 60)
-    print("SPL 叙事一致性审计 · 通用演示")
-    print("=" * 60)
-    print(engine.compile_all())
+    print("\n" + "-" * 60)
+    print("审查报告摘要：")
+    print("-" * 60)
+    print(f"  条款总数：{report['clause_count']}")
+    print(f"  类型分布：{report['clause_type_distribution']}")
+    print(f"  崩溃判定：{report['collapse_verdict']}")
+    print(f"  全局缺失：{report['global_missing']}")
+    print(f"  悬空条款：{len(report['dangling_clauses'])}个")
+    for dc in report["dangling_clauses"]:
+        print(f"    - {dc['id']}({dc['type']}): {dc['deps']}")
+    print(f"  修复建议：{len(report['repair_suggestions'])}条")
+    for rs in report["repair_suggestions"]:
+        print(
+            f"    - [{rs['fix_type']}] -> {rs['target_id']}: {rs['adds_premise'][:50]}..."
+        )
+    print(f"  收敛状态：{'通过' if report['overall_passed'] else '未通过'}")
+    if not report["overall_passed"]:
+        print(f"  诊断：{report['reconstruction']['diagnosis']}")
+    print("-" * 60)
