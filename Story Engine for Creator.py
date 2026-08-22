@@ -1,6 +1,7 @@
 import uuid
 import json
 import re
+import hashlib
 from dataclasses import asdict, dataclass, field
 from typing import Dict, Any, List, Callable, Optional, Protocol, Tuple
 from collections import defaultdict
@@ -215,6 +216,10 @@ class CausalNode:
     child_nodes: List[str] = field(default_factory=list)
     causal_weights: Dict[str, float] = field(default_factory=dict)
     character: str = ""  # 新增：节点所属角色，便于自动注册
+    time: str = ""  # 时空坐标：节点发生的显式时间标记（留空=未声明）
+    place: str = ""  # 时空坐标：节点发生的显式地点标记（留空=未声明）
+    foreshadow: str = ""  # 伏笔语义标记，取值 SET(埋伏笔)/PAY(回收)/空串(非伏笔节点)
+    foreshadow_topic: str = ""  # 伏笔主题（如"玉佩来历"），空串=未标记
 
 
 @dataclass
@@ -851,6 +856,158 @@ def parse_outline_to_nodes(outline: str) -> List[CausalNode]:
 
 
 # =============================================================================
+# 伏笔台账（Foreshadow Ledger）
+# P0 唯一真缺口：记录"埋(埋下/铺垫/留下)－收(回收/呼应/揭开/兑现)"全生命周期。
+# 决定论：仅凭显式关键词与主题字符串对账，不臆造"哪些算伏笔"。
+# =============================================================================
+_FORESHADOW_SET_HINTS = (
+    "埋下伏笔",
+    "埋下",
+    "埋伏笔",
+    "留下一句",
+    "留下线索",
+    "暗暗留下",
+    "留下伏笔",
+    "铺下伏笔",
+    "埋线",
+)
+_FORESHADOW_PAY_HINTS = (
+    "回收伏笔",
+    "呼应",
+    "揭开",
+    "真相大白",
+    "兑现",
+    "解释前文",
+    "收回伏笔",
+    "揭开谜底",
+    "原来如此",
+)
+# 主题断开符：用于从剧情句里切出"伏笔对象/主题"（取主题词后再校验，非概率）
+_FORESHADOW_TOPIC_SPLIT = re.compile(
+    r"[：:，,。；;！!？?\s]|(?:关于|指向|关于的|就是|在于)"
+)
+
+
+class ForeshadowLedger:
+    """伏笔台账：扫描因果节点/文本，登记 SET/PAY 并对账，输出未回收清单。"""
+
+    def __init__(self):
+        self.records: List[Dict[str, Any]] = []  # 每项 {node_id, chapter, topic, action}
+        self.topics_seen: List[str] = []
+
+    def _detect(self, text: str) -> Tuple[str, str]:
+        """从一句剧情文本中检测【伏笔动作 + 主题】。返回 (action, topic)；无命中返回 ("", "")。"""
+        if not text:
+            return "", ""
+        action = ""
+        for w in _FORESHADOW_SET_HINTS:
+            if w in text:
+                action = "SET"
+                break
+        if not action:
+            for w in _FORESHADOW_PAY_HINTS:
+                if w in text:
+                    action = "PAY"
+                    break
+        if not action:
+            return "", ""
+        # 主题提取：定位命中的动作短语，去掉动作词后取第一个非空语义段
+        action_word = ""
+        if action == "SET":
+            hits = [w for w in _FORESHADOW_SET_HINTS if w in text]
+            action_word = max(hits, key=len)
+        else:
+            hits = [w for w in _FORESHADOW_PAY_HINTS if w in text]
+            action_word = max(hits, key=len)
+        tail = text[text.rfind(action_word) + len(action_word):]
+        for seg in _FORESHADOW_TOPIC_SPLIT.split(tail):
+            seg = seg.strip(" 的了")
+            if seg:
+                topic = seg
+                break
+        return action, topic
+
+    def scan_nodes(self, nodes: List[CausalNode], chapter_id: Any = "") -> None:
+        """扫描因果节点链，登记其 premise+conclusion 两端的伏笔语义。"""
+        for n in nodes:
+            for field_txt in (n.premise, n.conclusion):
+                action, topic = self._detect(field_txt)
+                if action:
+                    n.foreshadow = action
+                    if topic:
+                        n.foreshadow_topic = topic
+                        self.topics_seen.append(topic)
+                    self.records.append(
+                        {
+                            "node_id": n.node_id,
+                            "chapter": chapter_id,
+                            "character": n.character,
+                            "topic": topic,
+                            "action": action,
+                        }
+                    )
+
+    def reconcile(self) -> Dict[str, Any]:
+        """对账：找出已 SET 未 PAY 的伏笔主题。输出未回收清单（决定论结论）。"""
+        set_topics = {r["topic"] for r in self.records if r["action"] == "SET" and r["topic"]}
+        pay_topics = {r["topic"] for r in self.records if r["action"] == "PAY" and r["topic"]}
+        unrecovered = sorted(set_topics - pay_topics)
+        ledger = {
+            "records": self.records,
+            "set_count": sum(1 for r in self.records if r["action"] == "SET"),
+            "pay_count": sum(1 for r in self.records if r["action"] == "PAY"),
+            "unrecovered_topics": unrecovered,
+            "all_closed": len(unrecovered) == 0,
+            "note": "伏笔台账：SET=埋下 PAY=回收；主题由显式关键词切出，未回收=已埋未收。",
+        }
+        return ledger
+
+
+# =============================================================================
+# 时空坐标一致性校验（角色 × 时间 × 地点 三维交叉）
+# P1：复用 timeline/geography 骨架；仅当节点显式声明 time 与 place 时参与校验，缺省跳过。
+# =============================================================================
+def audit_spacetime_consistency(nodes: List[CausalNode]) -> Dict[str, Any]:
+    """检测"同一角色同一时间出现在两个地点"类冲突。宁缺毋滥：无坐标者不参与。"""
+    conflicts: List[str] = []
+    by_key: Dict[Tuple[str, str], CausalNode] = {}
+    for n in nodes:
+        if not n.character or not n.time or not n.place:
+            continue  # 缺任一坐标，跳过（不臆造）
+        key = (n.character, n.time)
+        if key in by_key:
+            prev = by_key[key]
+            if prev.place != n.place:
+                conflicts.append(
+                    f"时空冲突：{n.character} 于 {n.time} 同时出现在 [{prev.place}] 与 [{n.place}]"
+                )
+        else:
+            by_key[key] = n
+    return {
+        "passed": len(conflicts) == 0,
+        "conflicts": conflicts,
+        "checked_nodes": len(by_key),
+        "note": "时空校验：仅对同时声明了角色/时间/地点的节点交叉比对。",
+    }
+
+
+# =============================================================================
+# 哈希链审计报告（NOHN 差异化：可信审计存证）
+# P2：复用 second-perspective 的 hash-chained 思路，为逐章节审计报告串上防篡改哈希链。
+# =============================================================================
+def _hash_block(prev_hash: str, payload: Any) -> str:
+    """计算单块哈希：prev_hash(32位hex) + payload 的字符串化摘要（对任意结构稳健）。"""
+    digester = hashlib.sha256()
+    digester.update(str(prev_hash).encode("utf-8"))
+    try:
+        body = json.dumps(payload, ensure_ascii=False, default=asdict)
+    except TypeError:
+        body = str(payload)
+    digester.update(body.encode("utf-8"))
+    return digester.hexdigest()
+
+
+# =============================================================================
 # CharacterProfiler：角色档案自动提取（候选，不臆造）
 # 从文本自动推断每角色的【语域画像 register_hints】与【已知知识 knowledge】候选。
 # 诚实原则：自动产物一律标记为 candidate，需作者确认后才生效；
@@ -980,6 +1137,9 @@ class UltimateCausalNovelEngine:
         self.chapters: List[Chapter] = []
         self.causal_graph: Dict[str, CausalNode] = {}
         self.llm_provider: Optional[LLMProvider] = None
+        # 新增：伏笔台账 + 可信审计哈希链（P0/P2）
+        self.foreshadow_ledger = ForeshadowLedger()
+        self.audit_chain_prefix: str = "GENESIS"  # 首块前驱，链头占位
 
         self._init_audit_engines()
         self._register_all_audit_plugins()
@@ -1717,12 +1877,15 @@ Output the revised passage only."""
         characters: Optional[Dict[str, Any]] = None,
         narration_mode: Optional[str] = None,
         include_causal: bool = True,
+        diff_only: bool = False,
     ) -> Dict[str, Any]:
         """对已有文本/大纲做三层审计，输出完整报告。
 
         层1 因果层（五步算子）：对大纲事件链做脆弱性/责任/收敛判定
         层2 叙事呈现层（四审计）：史官旁观 / 台词时代 / 台词认知 / 台词语域
         层3 逻辑一致性（已有插件）：逻辑跳跃 / 前提-结论匹配（对文本拆句触发）
+        新增层4 伏笔台账 + 时空校验（P0/P1，决定论）
+        新增层5 哈希链存证（P2，可信审计）
 
         参数：
           text: 待审文本（正文或大纲）
@@ -1730,7 +1893,9 @@ Output the revised passage only."""
           characters: 角色档案（knowledge/forbidden_knowledge/register_hints）
           narration_mode: 叙事立场覆盖；None 时按 outline 关键词推断
           include_causal: 是否跑五步算子因果层
-        返回：结构化报告（含 all_passed 汇总）。
+          diff_only: 增量审计模式（P1）——仅对本次传入的 text 做检查，跳过已累积的
+                     全局状态重算，适合编辑单章/碎片的"实时守门"短路径。
+        返回：结构化报告（含 all_passed 汇总 + 伏笔/时空/哈希字段）。
         """
         char_map = characters or self.global_state.characters
         # —— 层2 叙事呈现层（对正文文本）——
@@ -1777,6 +1942,24 @@ Output the revised passage only."""
             logical = self.node_auditor.audit(
                 {"text": text, "global_state": asdict(self.global_state)}
             )
+        # —— 增量审计（P1）：diff_only 时跳过全局重审，直接产出聚合报告 ——
+        if diff_only:
+            return self._build_audit_report(
+                presentation=presentation,
+                causal=causal,
+                logical=logical,
+                nodes=None,
+                run_ledger_scan=False,
+            )
+        # —— 层4 伏笔台账 + 时空校验（P0/P1）——
+        events_nodes = parse_outline_to_nodes(outline or text)
+        ledger_all_passed = True
+        spacetime = None
+        if events_nodes:
+            self.foreshadow_ledger.scan_nodes(events_nodes)
+            ledger = self.foreshadow_ledger.reconcile()
+            ledger_all_passed = ledger["all_closed"]
+            spacetime = audit_spacetime_consistency(events_nodes)
         # —— 汇总 ——
         pres_passed = self.presentation_auditor.all_passed(
             {"presentation": presentation}
@@ -1786,12 +1969,69 @@ Output the revised passage only."""
             or (causal["collapse_verdict"] == "STABLE" and causal["reconstruction"]["converged"])
         )
         logical_passed = logical is None or bool(logical.get("overall_passed"))
-        return {
+        spacetime_passed = spacetime is None or bool(spacetime["passed"])
+        all_passed = (
+            pres_passed
+            and causal_passed
+            and logical_passed
+            and ledger_all_passed
+            and spacetime_passed
+        )
+        report = {
             "presentation": presentation,
             "causal": causal,
             "logical": logical,
-            "all_passed": pres_passed and causal_passed and logical_passed,
+            "foreshadow": {
+                "ledger": self.foreshadow_ledger.reconcile()
+            },
+            "spacetime": spacetime,
+            "all_passed": all_passed,
         }
+        return self._stamp_audit_hash(report)
+
+    def _build_audit_report(
+        self,
+        presentation: Dict[str, Any],
+        causal: Optional[Dict[str, Any]],
+        logical: Optional[Dict[str, Any]],
+        nodes: Optional[List[CausalNode]],
+        run_ledger_scan: bool,
+    ) -> Dict[str, Any]:
+        """增量（diff-only）聚合，跳过全局重审。"""
+        pres_passed = self.presentation_auditor.all_passed(
+            {"presentation": presentation}
+        )
+        causal_passed = (
+            causal is None
+            or (causal["collapse_verdict"] == "STABLE" and causal["reconstruction"]["converged"])
+        )
+        logical_passed = logical is None or bool(logical.get("overall_passed"))
+        spacetime = None
+        if nodes:
+            spacetime = audit_spacetime_consistency(nodes)
+        spacetime_passed = spacetime is None or bool(spacetime["passed"])
+        ledger_passed = True
+        if run_ledger_scan and nodes:
+            self.foreshadow_ledger.scan_nodes(nodes)
+            ledger_passed = self.foreshadow_ledger.reconcile()["all_closed"]
+        report = {
+            "presentation": presentation,
+            "causal": causal,
+            "logical": logical,
+            "foreshadow": {"ledger": self.foreshadow_ledger.reconcile()},
+            "spacetime": spacetime,
+            "diff_only": True,
+            "all_passed": pres_passed and causal_passed and logical_passed
+            and spacetime_passed and ledger_passed,
+        }
+        return self._stamp_audit_hash(report)
+
+    def _stamp_audit_hash(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        """P2 哈希链存证：把本块报告串进引擎级哈希链，输出该块哈希与前驱哈希。"""
+        report["audit_hash"] = _hash_block(self.audit_chain_prefix, report)
+        report["audit_prev_hash"] = self.audit_chain_prefix
+        self.audit_chain_prefix = report["audit_hash"]
+        return report
 
 
 # =============================================================================
