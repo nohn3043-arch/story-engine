@@ -1,9 +1,73 @@
 import json
 import re
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List, Optional, Set, Protocol
 from collections import defaultdict
 from enum import Enum, auto
+
+
+# =============================================================================
+# LLM 协议与默认实现
+# =============================================================================
+
+class LLMProvider(Protocol):
+    """大模型接口协议：实现此协议的任何类都可注入引擎。"""
+    def generate(self, prompt: str, **kwargs) -> str: ...
+
+
+class OpenAIProvider:
+    """使用 urllib 调用 OpenAI 兼容接口的 LLM 实现（零外部依赖）。
+
+    Args:
+        api_key:   API 密钥。
+        model:     模型名称，如 "gpt-4o"、"deepseek-chat"。
+        base_url:  API 基础地址，默认 "https://api.openai.com/v1"。
+        timeout:   请求超时（秒）。
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gpt-4o",
+        base_url: str = "https://api.openai.com/v1",
+        timeout: int = 120,
+    ):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    def generate(self, prompt: str, **kwargs) -> str:
+        import urllib.request
+        import urllib.error
+
+        temperature = kwargs.get("temperature", 0.7)
+        max_tokens = kwargs.get("max_tokens", 4096)
+
+        body = json.dumps({
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                return result["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as e:
+            return f"[LLM Error] HTTP {e.code}: {e.read().decode('utf-8', errors='replace')[:200]}"
+        except Exception as e:
+            return f"[LLM Error] {e}"
 
 
 # =============================================================================
@@ -661,6 +725,11 @@ class ContractReviewEngine:
         self.repair_engine = StructuralRepairEngine(self.sp_engine)
         self.established_facts: Set[str] = set()
         self.review_history: List[Dict[str, Any]] = []
+        self.llm_provider: Optional[LLMProvider] = None
+
+    def set_llm_provider(self, provider: LLMProvider) -> None:
+        """注入大模型接口，启用 LLM 增强语义分析。"""
+        self.llm_provider = provider
 
     def review(
         self,
@@ -783,9 +852,45 @@ class ContractReviewEngine:
             "reconstruction": sp_recon,
             "overall_passed": sp_recon["converged"]
             and verdict != "INEVITABLE_COLLAPSE",
+            "llm_analysis": None,
         }
+
+        # LLM 增强语义分析（若已注入 provider）
+        if self.llm_provider is not None:
+            llm_result = self._llm_contract_analysis(clauses, report)
+            if llm_result:
+                report["llm_analysis"] = llm_result
+
         self.review_history.append(report)
         return report
+
+    def _llm_contract_analysis(
+        self, clauses: List[Dict[str, str]], report: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """使用 LLM 对合同条款进行语义级质量评估与风险分析。"""
+        clauses_text = "\n".join(
+            f"  [{c.get('id', f'C{i}')}] {c.get('premise', '')} → {c.get('conclusion', '')}"
+            for i, c in enumerate(clauses)
+        )
+        prompt = (
+            "你是一个企业合同审查专家。请对以下合同条款进行语义级质量评估，"
+            "识别语义模糊、条款冲突、权利义务不对等等深层问题。\n\n"
+            f"合同标题：{self.contract_title}\n"
+            f"审查结论：{'通过' if report['overall_passed'] else '未通过'}\n"
+            f"崩溃判定：{report['collapse_verdict']}\n\n"
+            f"条款列表：\n{clauses_text}\n\n"
+            "请以 JSON 格式返回分析结果，包含以下字段：\n"
+            "- semantic_issues: 语义问题列表（每条含 clause_id, issue, severity）\n"
+            "- conflict_clauses: 条款间冲突列表（每条含 clauses, description）\n"
+            "- imbalance_risks: 权利义务不对等风险列表\n"
+            "- llm_summary: 总体评估摘要（一段话）"
+        )
+        try:
+            raw = self.llm_provider.generate(prompt, temperature=0.3, max_tokens=4096)
+            result = json.loads(raw)
+            return result if isinstance(result, dict) else {"llm_raw_analysis": raw}
+        except Exception:
+            return None
 
     def save_report(self, report: Dict[str, Any], path: str):
         with open(path, "w", encoding="utf-8") as f:

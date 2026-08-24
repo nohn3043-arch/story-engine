@@ -58,6 +58,64 @@ class LLMProvider(Protocol):
     def generate(self, prompt: str, **kwargs) -> str: ...
 
 
+class OpenAIProvider:
+    """使用 urllib 调用 OpenAI 兼容接口的 LLM 实现（零外部依赖）。
+
+    支持任何 OpenAI 兼容 API（OpenAI、vLLM、Ollama、本地代理等）。
+
+    Args:
+        api_key:   API 密钥。
+        model:     模型名称，如 "gpt-4o"、"deepseek-chat"。
+        base_url:  API 基础地址，默认 "https://api.openai.com/v1"。
+        timeout:   请求超时（秒）。
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gpt-4o",
+        base_url: str = "https://api.openai.com/v1",
+        timeout: int = 120,
+    ):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    def generate(self, prompt: str, **kwargs) -> str:
+        import json
+        import urllib.request
+        import urllib.error
+
+        temperature = kwargs.get("temperature", 0.7)
+        max_tokens = kwargs.get("max_tokens", 4096)
+
+        body = json.dumps({
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                return result["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as e:
+            return f"[LLM Error] HTTP {e.code}: {e.read().decode('utf-8', errors='replace')[:200]}"
+        except Exception as e:
+            return f"[LLM Error] {e}"
+
+
 # ==================== 基础数据结构（与原有保持一致）====================
 @dataclass
 class ResponsibilityAccount:
