@@ -17,11 +17,33 @@
 
 ## ✦ About
 
-<p style="font-size:15px;line-height:1.8;color:#2C2C2C">STORY-ENGINE is a narrative consistency checking engine for long-form fiction, performing automated audits on character settings, causal timelines, and memory threads to ensure million-word works remain coherent across characters, plots, and worldbuilding. It transforms an editor's intuitive checks into a reusable, structured pipeline.</p>
+<p style="font-size:15px;line-height:1.8;color:#2C2C2C">STORY-ENGINE 由两款定位清晰的产品组成：</p>
+
+<ul style="font-size:15px;line-height:1.8;color:#2C2C2C">
+  <li><strong>故事引擎（面向创作者与大众）</strong> — 长篇小说一致性引擎，对角色设定、因果时间线、记忆线做自动化审计，让百万字作品在人物、情节、世界观上保持一致；并提供 SPL 四阶段叙事编辑流水线。将编辑的直觉校验转化为可复用的结构化流程。</li>
+  <li><strong>文书审查引擎（面向企业）</strong> — 零依赖、可离线的企业级文书合规审查引擎，对合同、制度、公文、通用文本做条款级规则扫描与文档级审计（要素完整性 / 一致性 / 权利义务对等 / 格式），并输出可追溯的审查报告。</li>
+</ul>
 
 <p align="center">
   <img src="assets/overview.png" alt="STORY-ENGINE overview" style="width:100%">
 </p>
+
+</div>
+
+<p align="center">— ✦ —</p>
+
+## ✦ Design Direction
+
+<div style="max-width:880px;margin:0 auto;padding:0 16px">
+
+STORY-ENGINE 由两款独立产品组成，分别面向不同用户群体：
+
+| 产品 | 面向用户 | 模块 | 典型输入 |
+|------|----------|------|----------|
+| **故事引擎** | 创作者 / 大众 | `Story Engine for Creator.py` + `engine for business.py` | 角色 / 因果时间线 / 世界观 / 叙事元素 |
+| **文书审查引擎** | 企业 | `compliance_engine/` | 合同 / 制度 / 公文 / 通用文档 |
+
+两款产品共享同一套**决定论式审计设计语言**——责任闭环锚定（`ResponsibilityAccount`）、风险分级与全链路可追溯日志。文书审查引擎为相对独立的离线规则模块，**不依赖 LLM**，纯规则库、零第三方依赖、可离线运行，专门服务企业文档合规场景。
 
 </div>
 
@@ -46,28 +68,19 @@ python "Story Engine for Creator.py"      # creator-facing second-perspective co
 
 <div style="max-width:880px;margin:0 auto;padding:0 16px">
 
-STORY-ENGINE audits long-form narrative for consistency, turning editorial intuition into a reusable, structured pipeline. Two-layer architecture:
+STORY-ENGINE 由两款产品组成，分别服务不同用户群体：
 
-- **Creator Engine** (`Story Engine for Creator.py`) — narrative-facing cognitive audit layer:
-  - `ResponsibilityAccount` — anchors every check to a named responsibility node (who / character / stage).
-  - `CognitiveAuditEngine` + pluggable `AuditPlugin` + `EmotionalConstraint` — composable audit dimensions.
-  - `CausalNode` carries `implicit_assumptions` and `vulnerability_score` — tracks *because → therefore* logic and quantifies fragility.
-  - `NarrativeStripper` / `ImplicitAssumptionDetector` / `VulnerabilityAssessor` — second-perspective operator pipeline.
-  - `AutomaticRepairEngine` (full jump-word repair) / `UltimateCausalNovelEngine` / `SecondPerspectiveCausalEngine` / `WorldBuilder` (token-level worldbuilding extraction) — repair, full-book audit, and worldbuilding layers.
-- **Business Engine** (`engine for business.py`) — SPL four-stage native reasoning pipeline:
-  1. `STRIP_NARRATIVE` — identifies narrative elements (foreshadowing / turn / climax / setup).
-  2. `SCAN_ASSUMPTION` — `ImplicitAssumptionScanner` validates motivation and plot logic.
-  3. `HEDGE_RISK` — `VulnerabilityHedge` flags OOC, logic holes, pacing issues; `CausalIntersectionBroker` merges worldlines.
-  4. `LOCK_RESPONSIBILITY` — outputs a quality score with traceable optimizations.
-  - Risk levels: `SAFE` / `WARNING` / `CRITICAL` / `FATAL`; node states: `RAW` / `STRIPPED` / `AUDITED` / `PRUNED` / `ACTIVE`.
-  - `SPLStoryGenerationEngine` + `StylisticScribe` drive generation; `DeepSeekProvider` / `MockLLM` are swappable LLM backends.
-- **创作者引擎**（`Story Engine for Creator.py`）——面向叙事的认知审计层：
+### 故事引擎（面向创作者与大众）
+
+长篇小说一致性引擎，将编辑的直觉校验转化为可复用的结构化流程。包含两层：
+
+- **Creator Engine**（`Story Engine for Creator.py`）——面向叙事的认知审计层：
   - `ResponsibilityAccount`——每项检查锚定到具名责任节点（谁 / 角色 / 阶段）。
   - `CognitiveAuditEngine` + 可插拔 `AuditPlugin` + `EmotionalConstraint`——可组合审计维度。
   - `CausalNode` 携带 `implicit_assumptions` 与 `vulnerability_score`——追踪 *因为 → 所以* 逻辑并量化脆弱性。
   - `NarrativeStripper` / `ImplicitAssumptionDetector` / `VulnerabilityAssessor`——第二视角算子流水线。
   - `AutomaticRepairEngine`（全量跳跃词修复）/ `UltimateCausalNovelEngine` / `SecondPerspectiveCausalEngine` / `WorldBuilder`（分词级世界观提取）——修复、全书审计与世界观构建层。
-- **业务引擎**（`engine for business.py`）——SPL 四阶段原生推理流水线：
+- **Business Engine**（`engine for business.py`）——SPL 四阶段原生推理流水线：
   1. `STRIP_NARRATIVE`——识别叙事元素（伏笔 / 转折 / 高潮 / 铺垫）。
   2. `SCAN_ASSUMPTION`——`ImplicitAssumptionScanner` 校验动机与剧情逻辑。
   3. `HEDGE_RISK`——`VulnerabilityHedge` 标记 OOC、逻辑漏洞、节奏问题；`CausalIntersectionBroker` 合并世界线。
@@ -75,7 +88,17 @@ STORY-ENGINE audits long-form narrative for consistency, turning editorial intui
   - 风险级别：`SAFE` / `WARNING` / `CRITICAL` / `FATAL`；节点状态：`RAW` / `STRIPPED` / `AUDITED` / `PRUNED` / `ACTIVE`。
   - `SPLStoryGenerationEngine` + `StylisticScribe` 驱动生成；`DeepSeekProvider` / `MockLLM` 为可替换 LLM 后端。
 
-Both layers share the same cognitive audit core as the second-perspective engine — this applies audit discipline to narrative, not decision-making.
+### 文书审查引擎（面向企业）
+
+企业级文书合规审查引擎（`compliance_engine/`），零依赖、可离线运行：
+
+- 支持合同 / 制度 / 公文 / 通用四类文书的条款级规则扫描 + 文档级审计（要素完整性 / 一致性 / 权利义务对等 / 格式）。
+- `ComplianceEngine` 编排：分节 → 规则扫描 → 文档级审计 → 责任闭环 → 评分 → 报告。
+- `ResponsibilityAccount` 责任闭环锚定 + `TraceLog` 全链路可追溯；判定为决定论式（命中即判定），不输出概率。
+- `RuleEngine` 加载纯 JSON 规则库（可 `--rules-dir` 外部扩展）；四类 `Auditor` 与条款级命中互补。
+- 报告支持 HTML（可视化）/ JSON（结构化）/ Markdown（归档）三格式；完整 CLI：`audit` / `list-rules` / `demo`。
+
+两款产品共享同一套决定论式审计设计语言（责任闭环锚定、风险分级、全链路可追溯），但分别面向创意叙事与企业文档两类场景。
 
 **Robustness hardening (2026-08 fixes)**:
 - **Character-name plausibility filter** — `_extract_plausible_name` excludes pronouns / verb phrases / weather-scene words, preferring absence over noise: `"坚持己见" → ""`, `"他说：我们走吧" → ""`, `"林夏在评审会上坚持自研方案" → "林夏"`.
@@ -120,6 +143,9 @@ Or run the built-in engines directly:
 ```bash
 python "Story Engine for Creator.py"
 python "engine for business.py"
+python -m compliance_engine audit --type contract --input 合同.txt --output 报告.html
+python -m compliance_engine list-rules --type regulation
+python -m compliance_engine demo
 ```
 
 </div>
@@ -130,8 +156,13 @@ python "engine for business.py"
 
 ```
 STORY-ENGINE/
-├── Story Engine for Creator.py    # creator-facing cognitive audit engine
-├── engine for business.py         # SPL four-stage editorial reasoning pipeline
+├── Story Engine for Creator.py    # creator-facing narrative cognitive audit engine
+├── engine for business.py         # SPL four-stage editorial + contract-review pipeline
+├── compliance_engine/             # enterprise document compliance audit engine (offline, zero-dep)
+│   ├── engine.py / models.py / auditors.py / rules.py / report.py
+│   ├── cli.py                     # audit / list-rules / demo
+│   ├── rules/                     # contract.json / regulation.json / official_doc.json / common.json
+│   └── demo.py
 ├── assets/                        # banner.svg/png, overview.svg/png
 └── LICENSE
 ```
@@ -148,7 +179,7 @@ STORY-ENGINE is a member of the NOHN AI ecosystem — a family of projects built
 | **NOMOS** | [nohn3043-arch/second-perspective](https://github.com/nohn3043-arch/second-perspective) (`Intelligent-Decision-Hub--Nomos` branch) | Auditable deterministic decision hub (IMDA 95/100) |
 | **SPL-G1** | [nohn3043-arch/SPL-G1](https://github.com/nohn3043-arch/SPL-G1) | Hardware causal-audit trusted computing unit (TCU) |
 | **SPL-Virtual-World-Base** | [nohn3043-arch/Second-Reality](https://github.com/nohn3043-arch/Second-Reality) | Virtual-world & metaverse infrastructure (constitution / law / bridge) |
-| **Story-Engine** | [nohn3043-arch/story-engine](https://github.com/nohn3043-arch/story-engine) | Long-form narrative consistency engine |
+| **Story-Engine** | [nohn3043-arch/story-engine](https://github.com/nohn3043-arch/story-engine) | 故事引擎（创作者/大众）+ 文书审查引擎（企业） |
 | **Antares** | [nohn3043-arch/Antares](https://github.com/nohn3043-arch/Antares) | GFSIP v1.0 — causally-audited federated stable interoperability protocol |
 | **Anthropomorphic-Agent-Engine** | [nohn3043-arch/Anthropomorphic-Agent-Engine](https://github.com/nohn3043-arch/Anthropomorphic-Agent-Engine) | Deterministic anthropomorphic psychology engine (SPL Pure Core V8.0) |
 | **PAGES** | [nohn3043-arch/pages](https://github.com/nohn3043-arch/pages) | NOHN AI ecosystem official landing page |
