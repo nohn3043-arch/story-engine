@@ -1163,6 +1163,9 @@ class UltimateCausalNovelEngine:
             self.sp_engine.llm_provider = provider
         if getattr(self, "world_builder", None) is not None:
             self.world_builder.llm_provider = provider
+        # 同步文风审计器：可选 LLM 辅助（默认关闭，开启后用于病句/修辞一致性）
+        if getattr(self, "presentation_auditor", None) is not None:
+            self.presentation_auditor.prose_auditor.llm_provider = provider
 
     def _init_audit_engines(self):
         self.planning_auditor = CognitiveAuditEngine(
@@ -1357,6 +1360,7 @@ class UltimateCausalNovelEngine:
                     text = self._call_llm_for_node(node, chapter)
                 node_audit = None
                 vuln_audit = None
+                prose_audit = None
                 for attempt in range(max_retries):
                     node_audit = self.node_auditor.audit(
                         {
@@ -1368,14 +1372,21 @@ class UltimateCausalNovelEngine:
                     vuln_audit = self.vulnerability_auditor.audit(
                         {"node": node, "text": text}
                     )
-                    if node_audit["overall_passed"] and vuln_audit["overall_passed"]:
-                        node.audit_report = {**node_audit, "vulnerability": vuln_audit}
+                    # 段级文风审计（规则版零依赖）；仅在有 LLM 时才阻塞重写（规则层不臆造文字）
+                    prose_audit = self.presentation_auditor.prose_auditor.audit(text)
+                    prose_ok = prose_audit["passed"] or self.llm_provider is None
+                    if node_audit["overall_passed"] and vuln_audit["overall_passed"] and prose_ok:
+                        node.audit_report = {
+                            **node_audit,
+                            "vulnerability": vuln_audit,
+                            "prose_style": prose_audit,
+                        }
                         full_content += text + "\n\n"
                         break
-                    # 审计失败：优先带因果约束的 LLM 重写（若提供了 provider），否则降级规则修复
+                    # 审计失败：优先带因果/文风约束的 LLM 重写，否则降级规则修复
                     if self.llm_provider is not None:
                         rewritten = self._call_llm_rewrite_with_constraints(
-                            node, node_audit, vuln_audit
+                            node, node_audit, vuln_audit, prose_audit
                         )
                         if rewritten:
                             text = rewritten
@@ -1395,9 +1406,22 @@ class UltimateCausalNovelEngine:
                     self.llm_provider,
                 )
                 node.audit_report = (
-                    {**node_audit, "vulnerability": vuln_audit} if node_audit else {}
+                    {**node_audit, "vulnerability": vuln_audit, "prose_style": prose_audit}
+                    if node_audit
+                    else {}
                 )
                 full_content += text + "\n\n"
+        # —— 整章文风审计（渲染章节后守门）：跨段上下文检查节奏/复用/视角一致性 ——
+        chapter_prose = self.presentation_auditor.prose_auditor.audit(full_content)
+        for _ in range(max_retries):
+            if chapter_prose["passed"] or self.llm_provider is None:
+                break
+            rewritten = self._call_llm_rewrite_chapter_prose(full_content, chapter_prose)
+            if not rewritten:
+                break
+            full_content = rewritten
+            chapter_prose = self.presentation_auditor.prose_auditor.audit(full_content)
+
         consistency_audit = self.consistency_auditor.audit(
             {
                 "chapter": asdict(chapter),
@@ -1437,6 +1461,7 @@ class UltimateCausalNovelEngine:
         chapter.audit_report = {
             **consistency_audit,
             "second_perspective": second_perspective,
+            "prose_style": chapter_prose,
         }
         changes = self.state_extractor.extract(full_content, self.global_state)
         for key, val in changes.items():
@@ -1446,7 +1471,11 @@ class UltimateCausalNovelEngine:
         return full_content
 
     def _call_llm_rewrite_with_constraints(
-        self, node: CausalNode, node_audit: Dict[str, Any], vuln_audit: Dict[str, Any]
+        self,
+        node: CausalNode,
+        node_audit: Dict[str, Any],
+        vuln_audit: Dict[str, Any],
+        prose_audit: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """审计失败后将审计问题作为约束回传 LLM 重写；无 provider 或异常时返回 None（由调用方降级 repair）。"""
         if self.llm_provider is None:
@@ -1457,6 +1486,12 @@ class UltimateCausalNovelEngine:
                 issues.append(f"[{name}] {issue}")
         for issue in vuln_audit.get("issues", []):
             issues.append(f"[vulnerability] {issue}")
+        # 段级文风问题并入约束（视角头跳/语域漂移/冗余等）
+        if prose_audit:
+            for key, val in prose_audit.items():
+                if isinstance(val, dict) and not val.get("passed", True) and "hits" in val:
+                    for hit in val["hits"]:
+                        issues.append(f"[prose:{key}] {hit}")
         if not issues:
             return None
         lang = (self.output_language or "zh").lower().strip()
@@ -1482,6 +1517,42 @@ Output 120-200 English words."""
 请重写以消除上述问题，保持人物性格与情节连贯，严禁生硬转折词。
 {style_block}
 输出150-250字的小说文本。"""
+        try:
+            return self.llm_provider.generate(prompt, temperature=0.6, max_tokens=8000)
+        except Exception:
+            return None
+
+    def _call_llm_rewrite_chapter_prose(
+        self, full_content: str, prose_audit: Dict[str, Any]
+    ) -> Optional[str]:
+        """整章渲染后文风审计不通过：把文风问题作为约束回传 LLM 重写整章；无 provider 返回 None。"""
+        if self.llm_provider is None:
+            return None
+        issues = []
+        for key, val in prose_audit.items():
+            if isinstance(val, dict) and not val.get("passed", True) and "hits" in val:
+                for hit in val["hits"]:
+                    issues.append(f"[{key}] {hit}")
+        if not issues:
+            return None
+        lang = (self.output_language or "zh").lower().strip()
+        issue_text = "\n".join(issues)
+        style_hint = self._style_instruction()
+        style_block = (
+            f"\n文体风格约束（必须严格遵守）：\n{style_hint}\n" if style_hint else ""
+        )
+        if lang in ("en", "english"):
+            prompt = f"""You are a top-tier prose editor. The chapter below FAILED the prose-style audit:
+{issue_text}
+Rewrite the ENTIRE chapter to fix these style issues (unify POV, remove register drift, fix rhythm/redundancy) while keeping the plot and events unchanged.
+{style_block}
+Output the revised full chapter text."""
+        else:
+            prompt = f"""你是一名顶级文字编辑。以下章节未通过文风一致性审计，问题如下：
+{issue_text}
+请在保持情节与事件不变的前提下重写整章，消除上述文风问题（统一叙事视角、清除语域漂移、修正节奏单调与冗余赘词等）。
+{style_block}
+输出重写后的完整章节文本。"""
         try:
             return self.llm_provider.generate(prompt, temperature=0.6, max_tokens=8000)
         except Exception:
@@ -1641,8 +1712,17 @@ Avoid abrupt words like "suddenly", "out of nowhere". Do NOT repeat previous con
         new_text = text
         lang = (self.output_language or "zh").lower().strip()
 
+        # 文风审计：把 prose 层问题也并入修复约束（有 LLM 时进入重写；无 LLM 仅暴露）
+        prose_audit = self.presentation_auditor.prose_auditor.audit(text)
+        prose_issues = []
+        for key, val in prose_audit.items():
+            if isinstance(val, dict) and not val.get("passed", True) and "hits" in val:
+                for hit in val["hits"]:
+                    prose_issues.append(f"[文风:{key}] {hit}")
+        fix_issues = list(issues) + prose_issues
+
         if self.llm_provider is not None:
-            issue_text = "\n".join(issues) if issues else "未发现具体问题，请整体提升叙事质量"
+            issue_text = "\n".join(fix_issues) if fix_issues else "未发现具体问题，请整体提升叙事质量"
             style_hint = self._style_instruction()
             style_block = (
                 f"\n文体风格约束（必须严格遵守）：\n{style_hint}\n"
@@ -1688,6 +1768,7 @@ Output the revised passage only."""
                         "new_text": resp.strip(),
                         "diff": [("REWRITE", text[:40] + "…", resp.strip()[:40] + "…")],
                         "actions": actions,
+                        "prose_style": prose_audit,
                     }
             except Exception:
                 pass  # 降级到规则修复
@@ -1753,6 +1834,7 @@ Output the revised passage only."""
             "new_text": new_text,
             "diff": [("EDIT", text[:40] + "…", new_text[:40] + "…")] if changed else [],
             "actions": actions,
+            "prose_style": prose_audit,
         }
 
     # ==================== 推演模式（Simulate） ====================
@@ -2491,11 +2573,238 @@ def audit_dialogue_registry(
     }
 
 
-class NarrativePresentationAuditor:
-    """叙事呈现层审计门面：四审计 + 立场推断，供审稿/推演复用。"""
+class ProseStyleAuditor:
+    """散文文风审计（prose-level style audit）。
 
-    def __init__(self, world_rules: Optional[Dict[str, Any]] = None):
+    在叙事呈现层之上做逐句文风一致性审查，与 NarrativePresentationAuditor 的
+    "叙事纪律"互补：前者管"以何种视角/语域叙述"，本类管"文风本身是否统一"。
+
+    支持两套风格族基线：
+      - eastern_ancient 东方古代叙事：文言/古风/章回/半文半白，容许长句、四字格、文言虚字
+      - western_plain   西方朴素文风：短句、弱修辞、低成语密度，贴近白描
+      - unknown / mixed 未判定或混杂（双向宽松，仅做通用检测）
+
+    纯规则检测器（零依赖、决定论、无黑箱）：
+      pov_head_hop      视角头跳：同一叙事流内感知主语逐句切换
+      tense_drift       时态漂移：中文弱时态下的过去/将来标记同句共现
+      redundancy        冗余赘词：虚字密度过高 / 叠字赘余
+      rhythm_monotone   节奏单调：句长变异系数过低
+      lexical_repeat    近距词汇复用：滑窗内实义片段重复
+      register_drift    语域漂移：东方基线混现代口语；西方基线堆砌文言/成语
+      show_dont_tell    抽象叙述占比过高（tell 多于 show）
+    可选 LLM 辅助（仅当 llm_provider 提供，默认关闭、不计入硬失败）：
+      llm.issues        病句 / 修辞一致性（概率性，标注 source="llm"）
+
+    阈值集中在 _THRESHOLDS，按文库调参。
+    """
+
+    _CLASSICAL_CHARS = "之乎者也矣焉哉夫其而于所与及以若者乃遂辄弗尝兮"
+    _EASTERN_WORDS = [
+        "遂", "乃", "吾", "汝", "妾", "卿", "陛下", "公子", "娘子", "阁下",
+        "府上", "在下", "贫道", "贫僧", "施主", "道友", "仙尊", "圣上",
+    ]
+    _MODERN_NETSLANG = [  # 纯网语/口语化过度词：在正常叙事（古今）均属文风漂移
+        "绝了", "yyds", "破防", "栓Q", "家人们", "属实", "简直了", "我裂开", "好吧",
+    ]
+    _MODERN_OBJECTS = ["手机", "微信", "电脑", "老板", "公司", "OK", "WiFi", "视频"]
+    _PERCEPTION_VB = [
+        "想", "心想", "暗自", "觉得", "感到", "意识到", "看见", "听到",
+        "猜测", "以为", "知道", "希望", "害怕", "明白",
+    ]
+    _ABSTRACT_TELL = [
+        "感到", "觉得", "似乎", "仿佛", "好像", "意识到", "认为", "知道",
+        "显得", "看起来", "让人", "令人",
+    ]
+    _REDUNDANT_PAIRS = ["的的", "了了", "着呢", "是在", "的了", "着的"]
+    _VIRTUAL_CHARS = "的了着在是于把被给"
+
+    _THRESHOLDS = {
+        "eastern_ancient": {"virtual_density": 0.30, "fourchar_density": 0.06,
+                            "rhythm_cv": 0.30, "tell_density": 0.32, "repeat_window": 6},
+        "western_plain":   {"virtual_density": 0.22, "fourchar_density": 0.02,
+                            "rhythm_cv": 0.40, "tell_density": 0.35, "repeat_window": 5},
+        "unknown":         {"virtual_density": 0.25, "fourchar_density": 0.04,
+                            "rhythm_cv": 0.35, "tell_density": 0.33, "repeat_window": 5},
+    }
+
+    def __init__(self, llm_provider=None):
+        self.llm_provider = llm_provider
+
+    # —— 风格族判定 ——
+    def detect_style_family(self, text: str) -> str:
+        if not text or not text.strip():
+            return "unknown"
+        total_han = self._han_chars(text)
+        if total_han == 0:
+            return "unknown"
+        classical = sum(1 for c in text if c in self._CLASSICAL_CHARS)
+        ancient_hit = sum(1 for w in self._EASTERN_WORDS if w in text)
+        fourchar = len(re.findall(r"[\u4e00-\u9fa5]{4}", text))
+        sents = self._split_sentences(text)
+        fourchar_density = fourchar / max(1, len(sents))
+        avg_len = total_han / max(1, len(sents))
+        has_modern = any(
+            w in text for w in self._MODERN_NETSLANG + self._MODERN_OBJECTS
+        )
+        if classical >= 8 or ancient_hit >= 2:
+            return "eastern_ancient"
+        if avg_len <= 22 and classical <= 2 and ancient_hit == 0 and not has_modern:
+            return "western_plain"
+        if has_modern and (classical >= 4 or ancient_hit >= 1):
+            return "mixed"
+        return "unknown"
+
+    # —— 工具 ——
+    @staticmethod
+    def _split_sentences(text: str):
+        return [s.strip() for s in re.split(r"[。！？!?；;]", text) if s.strip()]
+
+    @staticmethod
+    def _han_chars(text: str) -> int:
+        return sum(1 for c in text if "\u4e00" <= c <= "\u9fa5")
+
+    @staticmethod
+    def _th(fam: str) -> Dict[str, Any]:
+        return ProseStyleAuditor._THRESHOLDS.get(fam, ProseStyleAuditor._THRESHOLDS["unknown"])
+
+    # —— 检测器 ——
+    def _detect_head_hop(self, text, fam):
+        sents = self._split_sentences(text)
+        povs = []
+        for i, s in enumerate(sents):
+            m = re.search(r"(我|我们|他|她|他们|她们).{0,15}?(" + "|".join(self._PERCEPTION_VB) + ")", s)
+            if m:
+                povs.append((i, m.group(1)))
+        hits = []
+        for a, b in zip(povs, povs[1:]):
+            if a[1] != b[1]:
+                hits.append({"from": a[1], "to": b[1], "near_sentence": b[0]})
+        return {"passed": len(hits) == 0, "hits": hits[:10]}
+
+    def _detect_tense(self, text, fam):
+        sents = self._split_sentences(text)
+        hits = []
+        for i, s in enumerate(sents):
+            past = ("了" in s) or ("过" in s) or ("着" in s)
+            # 将来时强标记：将/即将，或「会」后接动词（避开「会议/会场」等名词）
+            future = ("将" in s) or ("即将" in s) or bool(
+                re.search(r"会(来|去|做|成|变|发|死|走|跑|想|说|写|看|吃|打|赢|败|裂|塌|倒|升|降|回|出|进|开|关|到|有|被|把|当|为|给|让|使|学|懂|醒|忘|记|知|明|落|散|聚|合)", s)
+            )
+            if past and future and not re.search(r"(次日|三年后|其后|第二天|彼时|那时|将来|此后|未几|翌日)", s):
+                hits.append({"sentence_index": i, "excerpt": s[:30]})
+        return {"passed": len(hits) == 0, "hits": hits[:10]}
+
+    def _detect_redundancy(self, text, fam):
+        th = self._th(fam)
+        total = max(1, self._han_chars(text))
+        virtual = sum(1 for c in text if c in self._VIRTUAL_CHARS)
+        density = virtual / total
+        pairs = [p for p in self._REDUNDANT_PAIRS if p in text]
+        return {"passed": density <= th["virtual_density"] and not pairs,
+                "metric": round(density, 3), "threshold": th["virtual_density"],
+                "redundant_pairs": pairs}
+
+    def _detect_rhythm(self, text, fam):
+        th = self._th(fam)
+        lens = [self._han_chars(s) for s in self._split_sentences(text)]
+        if len(lens) < 5:
+            return {"passed": True, "metric": None, "note": "样本不足"}
+        mean = sum(lens) / len(lens)
+        if mean < 15:  # 短句白描（西方朴素/海明威式）天然匀整，豁免单调判定
+            return {"passed": True, "metric": None, "note": "短句白描豁免"}
+        var = sum((x - mean) ** 2 for x in lens) / len(lens)
+        cv = (var ** 0.5) / mean if mean else 0
+        return {"passed": cv >= th["rhythm_cv"], "metric": round(cv, 3),
+                "threshold": th["rhythm_cv"], "mean_len": round(mean, 1)}
+
+    def _detect_lexical_repeat(self, text, fam):
+        if self._han_chars(text) > 4000:
+            return {"passed": True, "note": "skipped_long_text"}
+        th = self._th(fam)
+        sents = self._split_sentences(text)
+        win = th["repeat_window"]
+        hits = []
+        for start in range(max(0, len(sents) - win)):
+            window = "".join(sents[start:start + win])
+            fragments = re.findall(r"[\u4e00-\u9fa5]{2,}", window)
+            seen = {}
+            for frag in fragments:
+                if all(c in self._VIRTUAL_CHARS for c in frag):
+                    continue
+                seen[frag] = seen.get(frag, 0) + 1
+            for frag, cnt in seen.items():
+                if cnt >= 2:
+                    hits.append({"fragment": frag, "count": cnt, "near_window": start})
+        uniq = {}
+        for h in hits:
+            uniq.setdefault(h["fragment"], h)
+        return {"passed": len(uniq) == 0, "hits": list(uniq.values())[:10]}
+
+    def _detect_register_drift(self, text, fam):
+        hits = []
+        if fam != "western_plain":  # 非西方朴素基线：查网语漂移（古今叙事均不适）
+            for w in self._MODERN_NETSLANG:
+                if w in text:
+                    hits.append({"type": "modern_intrusion", "token": w})
+        if fam != "eastern_ancient":  # 非东方古代基线：查文言堆砌
+            classical = sum(1 for c in text if c in self._CLASSICAL_CHARS)
+            if classical >= 6:
+                hits.append({"type": "classical_pileup", "classical_chars": classical})
+        if fam in ("eastern_ancient", "mixed"):  # 古风/混杂：额外查现代物象穿越
+            for w in self._MODERN_OBJECTS:
+                if w in text:
+                    hits.append({"type": "modern_object_intrusion", "token": w})
+        return {"passed": len(hits) == 0, "hits": hits[:10]}
+
+    def _detect_tell(self, text, fam):
+        th = self._th(fam)
+        sents = self._split_sentences(text)
+        if not sents:
+            return {"passed": True, "metric": 0}
+        tell = sum(1 for s in sents if any(w in s for w in self._ABSTRACT_TELL))
+        density = tell / len(sents)
+        return {"passed": density <= th["tell_density"], "metric": round(density, 3),
+                "threshold": th["tell_density"]}
+
+    def _llm_check(self, text, fam):
+        if not self.llm_provider:
+            return {"enabled": False}
+        prompt = (
+            f"你是文风审查助手。给定文本（风格族：{fam}），仅列出：\n"
+            "1) 病句/不通顺；2) 修辞前后不一致。\n"
+            "无明显问题返回空列表。用 JSON 返回 {\"issues\":[...]}。\n\n"
+            f"文本：\n{text[:2000]}"
+        )
+        try:
+            return {"enabled": True, "source": "llm", "issues": self.llm_provider.generate(prompt)}
+        except Exception:
+            return {"enabled": True, "source": "llm", "error": "llm_call_failed"}
+
+    def audit(self, text: str, style_family: Optional[str] = None) -> Dict[str, Any]:
+        fam = style_family or self.detect_style_family(text)
+        results = {
+            "style_family": fam,
+            "pov_head_hop": self._detect_head_hop(text, fam),
+            "tense_drift": self._detect_tense(text, fam),
+            "redundancy": self._detect_redundancy(text, fam),
+            "rhythm_monotone": self._detect_rhythm(text, fam),
+            "lexical_repeat": self._detect_lexical_repeat(text, fam),
+            "register_drift": self._detect_register_drift(text, fam),
+            "show_dont_tell": self._detect_tell(text, fam),
+        }
+        results["passed"] = all(
+            v.get("passed", True) for k, v in results.items() if isinstance(v, dict)
+        )
+        results["llm"] = self._llm_check(text, fam)  # 可选辅助，不计入硬失败
+        return results
+
+
+class NarrativePresentationAuditor:
+    """叙事呈现层审计门面：四审计 + 立场推断 + 散文文风审计，供审稿/推演复用。"""
+
+    def __init__(self, world_rules: Optional[Dict[str, Any]] = None, llm_provider=None):
         self.world_rules = world_rules or {}
+        self.prose_auditor = ProseStyleAuditor(llm_provider)
 
     def infer_mode(self, outline: str) -> Optional[str]:
         return infer_narration_mode(outline)
@@ -2515,6 +2824,7 @@ class NarrativePresentationAuditor:
             "dialogue_era": audit_dialogue_era(text, self.world_rules),
             "dialogue_cognition": audit_dialogue_cognition(text, characters, events),
             "dialogue_registry": audit_dialogue_registry(text, characters),
+            "prose_style": self.prose_auditor.audit(text),
         }
 
     def all_passed(self, result: Dict[str, Any]) -> bool:
@@ -2526,6 +2836,7 @@ class NarrativePresentationAuditor:
                 "dialogue_era",
                 "dialogue_cognition",
                 "dialogue_registry",
+                "prose_style",
             )
         )
 
