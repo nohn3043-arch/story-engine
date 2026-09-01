@@ -1130,10 +1130,12 @@ class UltimateCausalNovelEngine:
         novel_title: str,
         initial_global_state: GlobalState,
         output_language: str = "zh",
+        target_style: Optional[str] = None,
     ):
         self.novel_title = novel_title
         self.global_state = initial_global_state
         self.output_language = output_language
+        self.target_style = target_style
         self.chapters: List[Chapter] = []
         self.causal_graph: Dict[str, CausalNode] = {}
         self.llm_provider: Optional[LLMProvider] = None
@@ -1166,6 +1168,20 @@ class UltimateCausalNovelEngine:
         # 同步文风审计器：可选 LLM 辅助（默认关闭，开启后用于病句/修辞一致性）
         if getattr(self, "presentation_auditor", None) is not None:
             self.presentation_auditor.prose_auditor.llm_provider = provider
+
+    def set_target_style(self, style: Optional[str]) -> None:
+        """设定目标文风（A+B）：生成时注入预设约束，审查时按对应族阈值校验；None 退回自动识别。"""
+        self.target_style = style
+
+    def _style_family(self) -> Optional[str]:
+        """返回当前目标文风映射到的审查族；未设定则回退 world_rules.style_profile.style，再否则 None（自动识别）。"""
+        style = self.target_style
+        if not style:
+            profile = (self.global_state.world_rules or {}).get("style_profile") or {}
+            style = profile.get("style")
+        if not style:
+            return None
+        return STYLE_PRESETS.get(style, {}).get("family")
 
     def _init_audit_engines(self):
         self.planning_auditor = CognitiveAuditEngine(
@@ -1373,7 +1389,9 @@ class UltimateCausalNovelEngine:
                         {"node": node, "text": text}
                     )
                     # 段级文风审计（规则版零依赖）；仅在有 LLM 时才阻塞重写（规则层不臆造文字）
-                    prose_audit = self.presentation_auditor.prose_auditor.audit(text)
+                    prose_audit = self.presentation_auditor.prose_auditor.audit(
+                        text, style_family=self._style_family()
+                    )
                     prose_ok = prose_audit["passed"] or self.llm_provider is None
                     if node_audit["overall_passed"] and vuln_audit["overall_passed"] and prose_ok:
                         node.audit_report = {
@@ -1412,7 +1430,9 @@ class UltimateCausalNovelEngine:
                 )
                 full_content += text + "\n\n"
         # —— 整章文风审计（渲染章节后守门）：跨段上下文检查节奏/复用/视角一致性 ——
-        chapter_prose = self.presentation_auditor.prose_auditor.audit(full_content)
+        chapter_prose = self.presentation_auditor.prose_auditor.audit(
+            full_content, style_family=self._style_family()
+        )
         for _ in range(max_retries):
             if chapter_prose["passed"] or self.llm_provider is None:
                 break
@@ -1940,7 +1960,29 @@ Output the revised passage only."""
         return profile
 
     def _style_instruction(self) -> str:
-        """从世界规则中的风格档案生成生成期文体约束；未识别风格时返回空串（调用方优雅降级）。"""
+        """生成期文体约束（A+B）：优先读取 STYLE_PRESETS[target_style] 生成结构化约束；
+        未指定文风时回退到 world_rules.style_profile（向后兼容 StyleRecognizer）。"""
+        style = self.target_style
+        if not style:
+            profile = (self.global_state.world_rules or {}).get("style_profile") or {}
+            style = profile.get("style")
+        if style:
+            preset = STYLE_PRESETS.get(style)
+            if preset:
+                lines = [
+                    f"目标文风：{preset.get('label_zh', '')}（{preset.get('label_en', '')}）",
+                    f"句式：{preset.get('sentence', '')}",
+                    f"修辞：{preset.get('rhetoric', '')}",
+                    f"视角：{preset.get('pov', '')}",
+                ]
+                if preset.get("encourage"):
+                    lines.append("鼓励使用的词汇/意象：" + "、".join(preset["encourage"]))
+                if preset.get("forbidden"):
+                    lines.append("严禁出现的词汇（语域漂移）：" + "、".join(preset["forbidden"]))
+                if preset.get("sample"):
+                    lines.append("风格示例：" + preset["sample"])
+                return "\n".join(lines)
+        # 回退：既有世界规则风格档案
         profile = (self.global_state.world_rules or {}).get("style_profile") or {}
         return StyleRecognizer.style_guidelines(profile)
 
@@ -1986,6 +2028,7 @@ Output the revised passage only."""
             characters=char_map or None,
             narration_mode=narration_mode,
             outline=outline,
+            style_family=self._style_family(),
         )
         # —— 层1 因果层（五步算子，对大纲/事件链）——
         causal = None
@@ -2625,13 +2668,32 @@ class ProseStyleAuditor:
                             "rhythm_cv": 0.40, "tell_density": 0.35, "repeat_window": 5},
         "unknown":         {"virtual_density": 0.25, "fourchar_density": 0.04,
                             "rhythm_cv": 0.35, "tell_density": 0.33, "repeat_window": 5},
+        # —— 扩展审查族（A：支持更多文风校验）——
+        "wuxia":           {"virtual_density": 0.32, "fourchar_density": 0.08,
+                            "rhythm_cv": 0.30, "tell_density": 0.30, "repeat_window": 6},
+        "xianxia":         {"virtual_density": 0.33, "fourchar_density": 0.09,
+                            "rhythm_cv": 0.28, "tell_density": 0.28, "repeat_window": 6},
+        "classical_poetry": {"virtual_density": 0.38, "fourchar_density": 0.14,
+                            "rhythm_cv": 0.25, "tell_density": 0.22, "repeat_window": 5},
+        "scifi":           {"virtual_density": 0.22, "fourchar_density": 0.02,
+                            "rhythm_cv": 0.42, "tell_density": 0.35, "repeat_window": 5},
+        "webnovel":        {"virtual_density": 0.24, "fourchar_density": 0.03,
+                            "rhythm_cv": 0.38, "tell_density": 0.40, "repeat_window": 5},
+        "hardboiled":      {"virtual_density": 0.18, "fourchar_density": 0.01,
+                            "rhythm_cv": 0.45, "tell_density": 0.30, "repeat_window": 4},
+        "epic_fantasy":    {"virtual_density": 0.30, "fourchar_density": 0.07,
+                            "rhythm_cv": 0.30, "tell_density": 0.30, "repeat_window": 6},
+        "urban":           {"virtual_density": 0.20, "fourchar_density": 0.02,
+                            "rhythm_cv": 0.42, "tell_density": 0.38, "repeat_window": 5},
     }
 
     def __init__(self, llm_provider=None):
         self.llm_provider = llm_provider
 
     # —— 风格族判定 ——
-    def detect_style_family(self, text: str) -> str:
+    def detect_style_family(self, text: str, target_style: Optional[str] = None) -> str:
+        if target_style:
+            return STYLE_PRESETS.get(target_style, {}).get("family", "unknown")
         if not text or not text.strip():
             return "unknown"
         total_han = self._han_chars(text)
@@ -2646,6 +2708,14 @@ class ProseStyleAuditor:
         has_modern = any(
             w in text for w in self._MODERN_NETSLANG + self._MODERN_OBJECTS
         )
+        # —— 自动识别：基于文风预设鼓励词命中，映射到具体审查族 ——
+        best_fam, best_n = "unknown", 0
+        for key, p in STYLE_PRESETS.items():
+            n = sum(1 for w in p.get("encourage", []) if w in text)
+            if n > best_n:
+                best_fam, best_n = p["family"], n
+        if best_n >= 2:
+            return best_fam
         if classical >= 8 or ancient_hit >= 2:
             return "eastern_ancient"
         if avg_len <= 22 and classical <= 2 and ancient_hit == 0 and not has_modern:
@@ -2799,6 +2869,85 @@ class ProseStyleAuditor:
         return results
 
 
+# ===================== 文风预设注册表（A+B：生成约束 + 审查族映射） =====================
+# 每个预设描述一种可指定的目标文风；family 映射到 ProseStyleAuditor 的审查阈值族，
+# 生成端由 _style_instruction 读取生成约束，审查端按 family 阈值校验（决定论、零依赖）。
+STYLE_PRESETS = {
+    "wuxia": {
+        "label_zh": "武侠", "label_en": "Wuxia", "family": "wuxia",
+        "encourage": ["剑", "掌", "内力", "抱拳", "纵身", "纵马", "江湖", "门派", "掌门", "侠", "招式", "轻功"],
+        "forbidden": ["手机", "微信", "电脑", "OK", "WiFi", "视频", "绝了", "yyds", "破防"],
+        "sentence": "多用四字格与利落短句，动作描写干净；允许半文半白。",
+        "rhetoric": "重白描与动作，少心理独白；对话干脆有江湖气。",
+        "pov": "第三人称限知 / 史官旁观",
+        "sample": "他抱拳一礼，纵身跃上墙头，剑光在月下划出一道冷弧。",
+    },
+    "xianxia": {
+        "label_zh": "仙侠", "label_en": "Xianxia", "family": "xianxia",
+        "encourage": ["仙", "灵", "气", "渡劫", "飞升", "宗门", "道友", "法宝", "灵根", "洞府"],
+        "forbidden": ["手机", "微信", "电脑", "OK", "WiFi", "视频", "绝了", "yyds"],
+        "sentence": "半文半白，长句铺陈天地灵气；可用对仗与虚字。",
+        "rhetoric": "重意境与气象描写，修辞偏瑰丽；对话清冷有仙风。",
+        "pov": "第三人称全知 / 史官旁观",
+        "sample": "灵气自洞府涌出，他闭目引气入体，恍若听见万物呼吸。",
+    },
+    "classical_poetry": {
+        "label_zh": "古风诗词", "label_en": "Classical poetry", "family": "classical_poetry",
+        "encourage": ["之", "乎", "者", "也", "兮", "风", "月", "江", "愁", "梦", "孤", "落"],
+        "forbidden": ["手机", "微信", "电脑", "OK", "WiFi", "视频", "绝了", "yyds", "破防"],
+        "sentence": "句式长短错落，重对仗与韵律；四字格与文言虚字密集。",
+        "rhetoric": "重意象与比兴，忌直白叙述；语域统一古雅。",
+        "pov": "抒情第一人称 / 第三人称限知",
+        "sample": "江风起兮波浩渺，孤舟独往梦迢遥。",
+    },
+    "scifi": {
+        "label_zh": "科幻", "label_en": "Sci-Fi", "family": "scifi",
+        "encourage": ["星", "舰", "量子", "文明", "轨道", "数据", "算法", "曲率", "维度", "信号"],
+        "forbidden": ["绝了", "yyds", "破防", "栓Q", "家人们"],
+        "sentence": "以白描与术语构建冷峻未来感；句长中等，逻辑清晰。",
+        "rhetoric": "重概念与机理，少用滥情比喻；对话精炼。",
+        "pov": "第三人称限知 / 史官旁观",
+        "sample": "曲率引擎点燃的瞬间，舰体在星图上拉出一道蓝色的痕。",
+    },
+    "webnovel": {
+        "label_zh": "网文", "label_en": "Web novel", "family": "webnovel",
+        "encourage": ["他", "她", "眼神", "心中", "气氛", "瞬间", "却在", "然而"],
+        "forbidden": ["绝了", "yyds", "破防", "栓Q", "家人们", "我裂开"],
+        "sentence": "快节奏，短中句交替；多用转折词维持爽感。",
+        "rhetoric": "重情绪钩子与节奏，可接受适度 tell；对话口语化。",
+        "pov": "第三人称限知",
+        "sample": "他却在下一瞬笑了，眼中寒意比刀更利。",
+    },
+    "hardboiled": {
+        "label_zh": "冷硬派", "label_en": "Hardboiled", "family": "hardboiled",
+        "encourage": ["烟", "街", "雨", "枪", "酒", "影子", "沉默", "血"],
+        "forbidden": ["绝了", "yyds", "破防", "栓Q", "家人们"],
+        "sentence": "极短句、硬冷白描；几乎不用形容词与比喻。",
+        "rhetoric": "重动作与环境，极少心理；对话 terse。",
+        "pov": "第一人称限知",
+        "sample": "雨还在下。我点燃最后一支烟，等电话响。",
+    },
+    "epic_fantasy": {
+        "label_zh": "史诗奇幻", "label_en": "Epic fantasy", "family": "epic_fantasy",
+        "encourage": ["王", "剑", "誓", "远征", "古老", "预言", "城邦", "龙", "命运"],
+        "forbidden": ["手机", "微信", "电脑", "OK", "WiFi", "视频", "绝了", "yyds"],
+        "sentence": "庄重长句铺陈，重场面与史诗感；可半文半白。",
+        "rhetoric": "重象征与宿命，修辞恢弘；对话有古韵。",
+        "pov": "第三人称全知 / 史官旁观",
+        "sample": "古老预言在风中复苏，王举起碎裂的剑，誓言仍未冷却。",
+    },
+    "urban": {
+        "label_zh": "都市", "label_en": "Urban", "family": "urban",
+        "encourage": ["公司", "地铁", "咖啡", "手机", "会议", "夜晚", "街角"],
+        "forbidden": ["绝了", "yyds", "破防", "栓Q", "家人们"],
+        "sentence": "现代白话，中等句长；允许现代物象。",
+        "rhetoric": "重生活质感与对话，自然口语；忌文言堆砌。",
+        "pov": "第一人称 / 第三人称限知",
+        "sample": "地铁进站的风卷起她的衣角，手机在掌心震了一下。",
+    },
+}
+
+
 class NarrativePresentationAuditor:
     """叙事呈现层审计门面：四审计 + 立场推断 + 散文文风审计，供审稿/推演复用。"""
 
@@ -2816,6 +2965,7 @@ class NarrativePresentationAuditor:
         narration_mode: Optional[str] = None,
         events: Optional[List[Dict[str, Any]]] = None,
         outline: str = "",
+        style_family: Optional[str] = None,
     ) -> Dict[str, Any]:
         mode = narration_mode or self.infer_mode(outline) or "chronicler"
         return {
@@ -2824,7 +2974,7 @@ class NarrativePresentationAuditor:
             "dialogue_era": audit_dialogue_era(text, self.world_rules),
             "dialogue_cognition": audit_dialogue_cognition(text, characters, events),
             "dialogue_registry": audit_dialogue_registry(text, characters),
-            "prose_style": self.prose_auditor.audit(text),
+            "prose_style": self.prose_auditor.audit(text, style_family=style_family),
         }
 
     def all_passed(self, result: Dict[str, Any]) -> bool:
