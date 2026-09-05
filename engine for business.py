@@ -4,27 +4,20 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional, Set, Protocol
 from collections import defaultdict
 from enum import Enum, auto
-
-
 # =============================================================================
 # LLM 协议与默认实现
 # =============================================================================
-
 class LLMProvider(Protocol):
     """大模型接口协议：实现此协议的任何类都可注入引擎。"""
     def generate(self, prompt: str, **kwargs) -> str: ...
-
-
 class OpenAIProvider:
     """使用 urllib 调用 OpenAI 兼容接口的 LLM 实现（零外部依赖）。
-
     Args:
         api_key:   API 密钥。
         model:     模型名称，如 "gpt-4o"、"deepseek-chat"。
         base_url:  API 基础地址，默认 "https://api.openai.com/v1"。
         timeout:   请求超时（秒）。
     """
-
     def __init__(
         self,
         api_key: str,
@@ -36,21 +29,17 @@ class OpenAIProvider:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-
     def generate(self, prompt: str, **kwargs) -> str:
         import urllib.request
         import urllib.error
-
         temperature = kwargs.get("temperature", 0.7)
         max_tokens = kwargs.get("max_tokens", 4096)
-
         body = json.dumps({
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": temperature,
             "max_tokens": max_tokens,
         }).encode("utf-8")
-
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=body,
@@ -68,8 +57,6 @@ class OpenAIProvider:
             return f"[LLM Error] HTTP {e.code}: {e.read().decode('utf-8', errors='replace')[:200]}"
         except Exception as e:
             return f"[LLM Error] {e}"
-
-
 # =============================================================================
 # 基础工具与序列化
 # =============================================================================
@@ -79,14 +66,11 @@ def _json_default(obj):
     if isinstance(obj, set):
         return list(obj)
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
-
 # =============================================================================
 # 合同条款分类枚举
 # =============================================================================
 class ContractClauseType(Enum):
     """合同条款分类，叙事剥离阶段自动识别"""
-
     PAYMENT = auto()  # 付款条款
     ACCEPTANCE = auto()  # 验收条款
     DELIVERY = auto()  # 交付条款
@@ -100,8 +84,6 @@ class ContractClauseType(Enum):
     WARRANTY = auto()  # 保证/质保条款
     EFFECTIVENESS = auto()  # 生效条款
     OTHER = auto()  # 其他条款
-
-
 # =============================================================================
 # 第二视角因果推理引擎 V2.1（决定论内核，无概率化推测）
 # 五步算子：叙事剥离 → 内隐假设透视 → 脆弱性对冲 → 责任闭环锚定 → 因果重构
@@ -109,20 +91,19 @@ class ContractClauseType(Enum):
 # =============================================================================
 class SecondPerspectiveCausalEngine:
     """决定论因果推理：仅做因果链的结构性判定，不输出概率估计。"""
-
     # —— 合同审查专用事实字典 ——
     _CONTRACT_PAYMENT_HINTS = [
         "付款",
         "支付",
         "缴纳",
-        "报酬",
-        "费用",
         "价款",
         "结算",
         "分期付款",
         "预付款",
         "尾款",
     ]
+    _CONTRACT_PAYMENT_WEAK_HINTS = ["费用", "报酬", "对价"]
+    _CONTRACT_PAYMENT_VERB_HINTS = ["支付", "付款", "缴纳", "给付", "偿付"]
     _CONTRACT_ACCEPTANCE_HINTS = [
         "验收",
         "检验",
@@ -194,7 +175,16 @@ class SecondPerspectiveCausalEngine:
         "期限届满",
         "时效经过",
     ]
-
+    @staticmethod
+    def _facts_confirm_timeliness(established_facts: Optional[Set[str]]) -> bool:
+        """外部确证事实中是否已声明诉讼时效/除斥期间安排。
+        若已确证，则不再将“时效缺失”重复判为建议性缺口。"""
+        if not established_facts:
+            return False
+        return any(
+            any(k in fact for k in ("时效", "诉讼时效", "除斥期间", "期限"))
+            for fact in established_facts
+        )
     @classmethod
     def _classify_clause_type(
         cls, text: str, conclusion: str = ""
@@ -231,12 +221,16 @@ class SecondPerspectiveCausalEngine:
             if source_text == conclusion:
                 continue
             break
+        # 弱支付提示词兜底：仅当弱词与支付类动词共现时才判定为付款条款，
+        # 避免 "费用""报酬" 等词单独出现时误判（如中介费用、服务报酬条款）。
+        if text and any(
+            w in text for w in cls._CONTRACT_PAYMENT_WEAK_HINTS
+        ) and any(v in text for v in cls._CONTRACT_PAYMENT_VERB_HINTS):
+            return ContractClauseType.PAYMENT
         return ContractClauseType.OTHER
-
     # =====================================================================
     # 合同审查专用方法（V2 假设探测 + V3 崩溃判定 + V4 责任锚定 + V5 重构）
     # =====================================================================
-
     def contract_clause_stripping(self, clauses):
         """合同条款叙事剥离：识别条款类型、标记前提/结论、检测悬空条款。
         输入 clauses: List[Dict{id, premise, conclusion, party}]。
@@ -262,7 +256,6 @@ class SecondPerspectiveCausalEngine:
         for i, cl in enumerate(chain):
             text = cl.get("premise", "") + cl.get("conclusion", "")
             ct = cl["clause_type"]
-            has_payment = any(h in text for h in self._CONTRACT_PAYMENT_HINTS)
             has_acceptance = any(
                 h in t
                 for t in all_clause_texts
@@ -270,9 +263,6 @@ class SecondPerspectiveCausalEngine:
             )
             has_breach = any(
                 h in t for t in all_clause_texts for h in self._CONTRACT_BREACH_HINTS
-            )
-            has_liability = any(
-                h in t for t in all_clause_texts for h in self._CONTRACT_LIABILITY_HINTS
             )
             has_obligation = any(
                 h in t
@@ -294,7 +284,6 @@ class SecondPerspectiveCausalEngine:
                 for t in all_clause_texts
                 for h in self._CONTRACT_FORCE_MAJEURE_HINTS
             )
-
             dangling_deps = []
             if ct == "PAYMENT" and not has_acceptance:
                 dangling_deps.append("PAYMENT_WITHOUT_ACCEPTANCE")
@@ -313,17 +302,16 @@ class SecondPerspectiveCausalEngine:
             if not has_force_majeure:
                 cl["missing_globals"].append("FORCE_MAJEURE")
         return chain
-
-    def contract_assumption_probe(self, chain):
+    def contract_assumption_probe(self, chain, established_facts: Optional[Set[str]] = None):
         """合同假设透视：逆反校验每条条款的内隐前提。
-        付款假设验收标准已定义；违约假设义务条款存在；责任假设违约条款存在。"""
+        付款假设验收标准已定义；违约假设义务条款存在；责任假设违约条款存在。
+        已确证事实（established_facts）用于豁免对应建议性假设，避免重复告警。"""
         all_texts = [cl.get("premise", "") + cl.get("conclusion", "") for cl in chain]
         all_text_joined = "".join(all_texts)
         for cl in chain:
             text = cl.get("premise", "") + cl.get("conclusion", "")
             assumptions = []
             ct = cl.get("clause_type", "OTHER")
-
             if ct == "PAYMENT":
                 has_acceptance = any(
                     h in all_text_joined for h in self._CONTRACT_ACCEPTANCE_HINTS
@@ -345,7 +333,6 @@ class SecondPerspectiveCausalEngine:
                         "collapse": "CONDITIONAL" if not has_delivery else "STABLE",
                     }
                 )
-
             if ct == "BREACH":
                 has_obligation = (
                     any(h in all_text_joined for h in self._CONTRACT_PAYMENT_HINTS)
@@ -362,7 +349,6 @@ class SecondPerspectiveCausalEngine:
                         "collapse": "INEVITABLE" if not has_obligation else "STABLE",
                     }
                 )
-
             if ct == "LIABILITY":
                 has_breach = any(
                     h in all_text_joined for h in self._CONTRACT_BREACH_HINTS
@@ -374,7 +360,6 @@ class SecondPerspectiveCausalEngine:
                         "collapse": "INEVITABLE" if not has_breach else "STABLE",
                     }
                 )
-
             if ct == "TERMINATION":
                 has_notice = any(
                     h in all_text_joined for h in self._CONTRACT_NOTICE_HINTS
@@ -386,7 +371,6 @@ class SecondPerspectiveCausalEngine:
                         "collapse": "INEVITABLE" if not has_notice else "STABLE",
                     }
                 )
-
             if ct == "CONFIDENTIALITY":
                 has_scope = any(h in text for h in ("范围", "期限", "期间", "地域"))
                 assumptions.append(
@@ -396,7 +380,6 @@ class SecondPerspectiveCausalEngine:
                         "collapse": "CONDITIONAL" if not has_scope else "STABLE",
                     }
                 )
-
             if ct == "DISPUTE_RESOLUTION":
                 has_jurisdiction = any(
                     h in text for h in ("管辖", "法院", "仲裁机构", "仲裁地")
@@ -408,12 +391,15 @@ class SecondPerspectiveCausalEngine:
                         "collapse": "INEVITABLE" if not has_jurisdiction else "STABLE",
                     }
                 )
-
             # 时效检测
             has_limitation = any(
                 h in all_text_joined for h in self._CONTRACT_LIMITATION_HINTS
             )
-            if ct in ("LIABILITY", "BREACH") and not has_limitation:
+            if (
+                ct in ("LIABILITY", "BREACH")
+                and not has_limitation
+                and not self._facts_confirm_timeliness(established_facts)
+            ):
                 assumptions.append(
                     {
                         "content": "违约/责任条款应约定诉讼时效或适用法定时效",
@@ -421,10 +407,8 @@ class SecondPerspectiveCausalEngine:
                         "collapse": "CONDITIONAL",
                     }
                 )
-
             cl["assumptions"] = assumptions
         return chain
-
     def contract_vulnerability_hedge(self, chain):
         """合同崩溃判定：责任真空=INEVITABLE，条款冲突=CONDITIONAL，时效缺失=CONDITIONAL。
         非概率判定，仅做结构性二元事实校验。"""
@@ -452,10 +436,8 @@ class SecondPerspectiveCausalEngine:
             cl["fragility"] = frag
             if frag > weakest_score:
                 weakest_score, weakest = frag, cl
-
         # 全局缺失扣分
         global_frag = len(global_missing) * 2
-
         if weakest is None and not global_missing:
             verdict = "STABLE"
         elif weakest_score >= 3 or global_frag >= 4:
@@ -464,7 +446,6 @@ class SecondPerspectiveCausalEngine:
             verdict = "CONDITIONAL_COLLAPSE"
         else:
             verdict = "STABLE"
-
         return {
             "weakest_variable": weakest["id"] if weakest else None,
             "weakest_clause": weakest,
@@ -481,7 +462,6 @@ class SecondPerspectiveCausalEngine:
                 for cl in chain
             ],
         }
-
     def contract_responsibility_anchor(self, chain):
         """合同责任闭环锚定：每条条款的责任主体、义务指向、最小决策单元。"""
         anchors = []
@@ -504,7 +484,6 @@ class SecondPerspectiveCausalEngine:
                 }
             )
         return anchors
-
     def contract_causal_reconstruction(
         self, chain, fix_vars, target_state="合同因果自洽"
     ):
@@ -542,7 +521,6 @@ class SecondPerspectiveCausalEngine:
             "diagnosis": f"合同因果链收敛至目标稳态：{target_state}",
             "fixed_ids": list(fixed_ids),
         }
-
     def _extract_contract_action(self, conclusion: str, clause_type: str) -> str:
         """提取合同条款中的核心行为动词。"""
         type_to_hints = {
@@ -562,7 +540,6 @@ class SecondPerspectiveCausalEngine:
             if h in conclusion:
                 return h
         return conclusion[:15]
-
     def _suggest_contract_fixes(self, chain) -> List[Dict[str, str]]:
         """根据悬空依赖生成补充条款建议。"""
         suggestions = []
@@ -618,25 +595,24 @@ class SecondPerspectiveCausalEngine:
                         }
                     )
         return suggestions
-
     # —— 内部工具 ——
     def _infer_character(self, text):
-        """兜底角色推断：当事件未显式声明 character 时，提取首个 2-3 字中文名候选。"""
-        m = re.search(r"([\u4e00-\u9fa5]{2,3})", text)
+        """兜底角色推断：优先匹配合同主体称谓（甲方/乙方/丙方…），
+        未显式声明时退回提取首个 2-3 字中文名候选（非贪婪，避免吞并相邻字）。"""
+        m = re.search(r"[甲乙丙丁戊己庚辛壬癸]方", text)
+        if m:
+            return m.group(0)
+        m = re.search(r"([\u4e00-\u9fa5]{2,3}?)", text)
         return m.group(1) if m else ""
-
-
 # =============================================================================
 # 结构性修复引擎 V5
 # 解决条款缺失等结构性问题（非表层词替换）
 # =============================================================================
 class StructuralRepairEngine:
     """结构性修复：条款缺失补全。"""
-
     def __init__(self, sp_engine: SecondPerspectiveCausalEngine):
         self.sp_engine = sp_engine
         self.repair_logs: List[Dict[str, Any]] = []
-
     def _log(self, repair_type: str, target_id: str, detail: str, action: str):
         self.repair_logs.append(
             {
@@ -647,7 +623,6 @@ class StructuralRepairEngine:
                 "timestamp": datetime.now().isoformat(),
             }
         )
-
     def repair_contract_gaps(self, chain, hedge_report) -> List[Dict]:
         """合同条款缺失修复：根据崩溃报告生成补充条款建议。"""
         fixes = []
@@ -710,15 +685,12 @@ class StructuralRepairEngine:
                 fix["adds_premise"],
             )
         return fixes
-
-
 # =============================================================================
 # 合同审查主管线
 # SPL四阶段 + 第二视角五步内核，面向企业合同文书审查场景
 # =============================================================================
 class ContractReviewEngine:
     """企业合同文书审查引擎：条款因果链构建 -> 假设透视 -> 崩溃判定 -> 责任锚定 -> 重构建议。"""
-
     def __init__(self, contract_title: str = ""):
         self.contract_title = contract_title
         self.sp_engine = SecondPerspectiveCausalEngine()
@@ -726,11 +698,9 @@ class ContractReviewEngine:
         self.established_facts: Set[str] = set()
         self.review_history: List[Dict[str, Any]] = []
         self.llm_provider: Optional[LLMProvider] = None
-
     def set_llm_provider(self, provider: LLMProvider) -> None:
         """注入大模型接口，启用 LLM 增强语义分析。"""
         self.llm_provider = provider
-
     def review(
         self,
         clauses: List[Dict[str, str]],
@@ -743,11 +713,9 @@ class ContractReviewEngine:
         """
         if established_facts:
             self.established_facts = established_facts
-
         print(
             f"\n===== 合同审查启动 | 《{self.contract_title}》 | 条款数：{len(clauses)} ====="
         )
-
         # 【SPL 1 叙事剥离：条款类型识别 + 依赖检测】
         print("1/5 执行：条款叙事剥离 & 类型识别")
         chain = self.sp_engine.contract_clause_stripping(clauses)
@@ -757,10 +725,11 @@ class ContractReviewEngine:
         print(f"   条款类型分布：{dict(type_dist)}")
         dangling_count = sum(1 for cl in chain if cl.get("dangling"))
         print(f"   依赖悬空条款：{dangling_count}个")
-
         # 【SPL 2 内隐假设透视：逆反校验】
         print("2/5 执行：内隐假设透视 & 逆反校验")
-        chain = self.sp_engine.contract_assumption_probe(chain)
+        chain = self.sp_engine.contract_assumption_probe(
+            chain, established_facts=self.established_facts
+        )
         inevitable_count = sum(
             1
             for cl in chain
@@ -768,7 +737,6 @@ class ContractReviewEngine:
             if a["collapse"] == "INEVITABLE"
         )
         print(f"   不可逆假设：{inevitable_count}个")
-
         # 【SPL 3 脆弱性对冲：崩溃判定】
         print("3/5 执行：脆弱性对冲 & 崩溃判定")
         hedge_report = self.sp_engine.contract_vulnerability_hedge(chain)
@@ -776,15 +744,12 @@ class ContractReviewEngine:
         print(f"   崩溃判定：{verdict}")
         if hedge_report.get("global_missing"):
             print(f"   全局缺失条款：{hedge_report['global_missing']}")
-
         # 【SPL 4 责任闭环锚定】
         print("4/5 执行：责任闭环锚定")
         anchors = self.sp_engine.contract_responsibility_anchor(chain)
         print(f"   责任锚点：{len(anchors)}个")
-
         # 【V5 结构性修复：补充条款建议】
         print("5/5 执行：结构性修复 & 补充建议")
-
         # 保存修复前状态快照（供报告使用，reconstruction 会原地修改 chain）
         pre_fix_dangling = [
             {
@@ -813,7 +778,6 @@ class ContractReviewEngine:
             for cl in chain
             if cl.get("assumptions")
         ]
-
         suggested_fixes = self.sp_engine._suggest_contract_fixes(chain)
         repair_fixes = self.repair_engine.repair_contract_gaps(chain, hedge_report)
         # 去重：按 (target_id, fix_type) 合并
@@ -826,7 +790,6 @@ class ContractReviewEngine:
                 all_fixes.append(fix)
         if all_fixes:
             print(f"   修复建议：{len(all_fixes)}条")
-
         # 【第二视角五步内核：因果重构收敛校验】
         sp_recon = self.sp_engine.contract_causal_reconstruction(
             chain, fix_vars=all_fixes, target_state="合同因果自洽"
@@ -835,7 +798,6 @@ class ContractReviewEngine:
             print(f"   ⚠️ {sp_recon['diagnosis']}")
         else:
             print(f"   ✅ {sp_recon['diagnosis']}")
-
         # 生成审计报告（使用修复前快照）
         report = {
             "contract_title": self.contract_title,
@@ -852,18 +814,16 @@ class ContractReviewEngine:
             "reconstruction": sp_recon,
             "overall_passed": sp_recon["converged"]
             and verdict != "INEVITABLE_COLLAPSE",
+            "established_facts": sorted(self.established_facts),
             "llm_analysis": None,
         }
-
         # LLM 增强语义分析（若已注入 provider）
         if self.llm_provider is not None:
             llm_result = self._llm_contract_analysis(clauses, report)
             if llm_result:
                 report["llm_analysis"] = llm_result
-
         self.review_history.append(report)
         return report
-
     def _llm_contract_analysis(
         self, clauses: List[Dict[str, str]], report: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
@@ -887,33 +847,28 @@ class ContractReviewEngine:
         )
         try:
             raw = self.llm_provider.generate(prompt, temperature=0.3, max_tokens=4096)
+            if raw.startswith("[LLM Error]"):
+                return {"llm_error": raw, "llm_analysis": None}
             result = json.loads(raw)
             return result if isinstance(result, dict) else {"llm_raw_analysis": raw}
-        except Exception:
-            return None
-
+        except Exception as exc:
+            return {"llm_error": f"{type(exc).__name__}: {exc}", "llm_analysis": None}
     def save_report(self, report: Dict[str, Any], path: str):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2, default=_json_default)
-
-
 # =============================================================================
 # 合同文书审查演示
 # =============================================================================
 if __name__ == "__main__":
     import sys
-
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
-
     print("#" * 60)
     print("# 合同文书审查 · 演示")
     print("#" * 60)
-
     contract_engine = ContractReviewEngine("软件开发外包合同（审查样例）")
-
     # 模拟合同条款：故意缺少验收条款和争议解决条款，制造依赖悬空和全局缺失
     contract_clauses = [
         {
@@ -959,9 +914,7 @@ if __name__ == "__main__":
             "conclusion": "双方负有保密义务，不得向第三方披露",
         },
     ]
-
     report = contract_engine.review(contract_clauses)
-
     print("\n" + "-" * 60)
     print("审查报告摘要：")
     print("-" * 60)
@@ -980,4 +933,3 @@ if __name__ == "__main__":
     print(f"  收敛状态：{'通过' if report['overall_passed'] else '未通过'}")
     if not report["overall_passed"]:
         print(f"  诊断：{report['reconstruction']['diagnosis']}")
-    print("-" * 60)
