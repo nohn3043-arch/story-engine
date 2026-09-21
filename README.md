@@ -17,11 +17,11 @@
 
 ## ✦ About
 
-<p style="font-size:15px;line-height:1.8;color:#2C2C2C">STORY-ENGINE 由两款定位清晰的产品组成：</p>
+<p style="font-size:15px;line-height:1.8;color:#2C2C2C">STORY-ENGINE consists of two clearly-positioned products:</p>
 
 <ul style="font-size:15px;line-height:1.8;color:#2C2C2C">
-  <li><strong>故事引擎（面向创作者与大众）</strong> — 长篇小说一致性引擎，对角色设定、因果时间线、记忆线做自动化审计，让百万字作品在人物、情节、世界观上保持一致；并提供 SPL 四阶段叙事编辑流水线。将编辑的直觉校验转化为可复用的结构化流程。</li>
-  <li><strong>文书审查引擎（面向企业）</strong> — 零依赖、可离线的企业级文书合规审查引擎，对合同、制度、公文、通用文本做条款级规则扫描与文档级审计（要素完整性 / 一致性 / 权利义务对等 / 格式），并输出可追溯的审查报告。</li>
+  <li><strong>Story Engine (for creators and the general public)</strong> — a long-form novel consistency engine that automatically audits character settings, causal timelines, and memory lines, keeping million-word works consistent in characters, plot, and worldview; it also provides the SPL four-stage narrative editing pipeline. It transforms an editor's intuitive verification into a reusable structured process.</li>
+  <li><strong>Document Review Engine (for enterprises)</strong> — a zero-dependency, offline-capable enterprise-grade document compliance review engine that performs clause-level rule scanning and document-level auditing (element completeness / consistency / rights-obligation parity / formatting) on contracts, regulations, official documents, and general text, and outputs traceable review reports.</li>
 </ul>
 
 <p align="center">
@@ -36,14 +36,14 @@
 
 <div style="max-width:880px;margin:0 auto;padding:0 16px">
 
-STORY-ENGINE 由两款独立产品组成，分别面向不同用户群体：
+STORY-ENGINE consists of two independent products, each targeting a different user group:
 
-| 产品 | 面向用户 | 模块 | 典型输入 |
+| Product | Target Users | Module | Typical Input |
 |------|----------|------|----------|
-| **故事引擎** | 创作者 / 大众 | `Story Engine for Creator.py` + `engine for business.py` | 角色 / 因果时间线 / 世界观 / 叙事元素 |
-| **文书审查引擎** | 企业 | `compliance_engine/` | 合同 / 制度 / 公文 / 通用文档 |
+| **Story Engine** | Creators / general public | `Story Engine for Creator.py` + `engine for business.py` | Characters / causal timeline / worldview / narrative elements |
+| **Document Review Engine** | Enterprises | `compliance_engine/` | Contracts / regulations / official documents / general text |
 
-两款产品共享同一套**决定论式审计设计语言**——责任闭环锚定（`ResponsibilityAccount`）、风险分级与全链路可追溯日志。文书审查引擎为相对独立的离线规则模块，**不依赖 LLM**，纯规则库、零第三方依赖、可离线运行，专门服务企业文档合规场景。
+Both products share the same **deterministic audit design language** — responsibility-loop anchoring (`ResponsibilityAccount`), risk grading, and full-chain traceable logs. The Document Review Engine is a relatively independent offline rule module that **does not depend on LLMs** — pure rule base, zero third-party dependencies, runs offline, dedicated to enterprise document compliance scenarios.
 
 </div>
 
@@ -68,49 +68,43 @@ python "Story Engine for Creator.py"      # creator-facing second-perspective co
 
 <div style="max-width:880px;margin:0 auto;padding:0 16px">
 
-STORY-ENGINE 由两款产品组成，分别服务不同用户群体：
+STORY-ENGINE consists of two products, each serving a different user group:
 
-### 故事引擎（面向创作者与大众）
+### Story Engine (for creators and the general public)
 
-长篇小说一致性引擎，将编辑的直觉校验转化为可复用的结构化流程。包含两层：
+A long-form novel consistency engine that transforms an editor's intuitive verification into a reusable structured process. It has two layers:
 
-- **Creator Engine**（`Story Engine for Creator.py`）——面向叙事的认知审计层：
-  - `ResponsibilityAccount`——每项检查锚定到具名责任节点（谁 / 角色 / 阶段）。
-  - `CognitiveAuditEngine` + 可插拔 `AuditPlugin` + `EmotionalConstraint`——可组合审计维度。
-  - `CausalNode` 携带 `implicit_assumptions` 与 `vulnerability_score`——追踪 *因为 → 所以* 逻辑并量化脆弱性。
-  - `NarrativeStripper` / `ImplicitAssumptionDetector` / `VulnerabilityAssessor`——第二视角算子流水线。
-  - `AutomaticRepairEngine`（全量跳跃词修复）/ `UltimateCausalNovelEngine` / `SecondPerspectiveCausalEngine` / `WorldBuilder`（分词级世界观提取）——修复、全书审计与世界观构建层。
-- **Business Engine**（`engine for business.py`）——SPL 四阶段原生推理流水线：
-  1. `STRIP_NARRATIVE`——识别叙事元素（伏笔 / 转折 / 高潮 / 铺垫）。
-  2. `SCAN_ASSUMPTION`——`ImplicitAssumptionScanner` 校验动机与剧情逻辑。
-  3. `HEDGE_RISK`——`VulnerabilityHedge` 标记 OOC、逻辑漏洞、节奏问题；`CausalIntersectionBroker` 合并世界线。
-  4. `LOCK_RESPONSIBILITY`——输出带可追溯优化的质量评分。
-  - 风险级别：`SAFE` / `WARNING` / `CRITICAL` / `FATAL`；节点状态：`RAW` / `STRIPPED` / `AUDITED` / `PRUNED` / `ACTIVE`。
-  - `SPLStoryGenerationEngine` + `StylisticScribe` 驱动生成；`DeepSeekProvider` / `MockLLM` 为可替换 LLM 后端。
+- **Creator Engine** (`Story Engine for Creator.py`) — the narrative-facing cognitive audit layer:
+  - `ResponsibilityAccount` — every check is anchored to a named responsibility node (who / role / stage).
+  - `CognitiveAuditEngine` + pluggable `AuditPlugin` + `EmotionalConstraint` — composable audit dimensions.
+  - `CausalNode` carries `implicit_assumptions` and `vulnerability_score` — tracks *because → therefore* logic and quantifies fragility.
+  - `NarrativeStripper` / `ImplicitAssumptionDetector` / `VulnerabilityAssessor` — the second-perspective operator pipeline.
+  - `AutomaticRepairEngine` (full jump-word repair) / `UltimateCausalNovelEngine` / `SecondPerspectiveCausalEngine` / `WorldBuilder` (token-level worldview extraction) — the repair, whole-book audit, and worldview construction layer.
+- **Business Engine** (`engine for business.py`) — the SPL four-stage native reasoning pipeline:
+  1. `STRIP_NARRATIVE` — identify narrative elements (foreshadowing / twist / climax / setup).
+  2. `SCAN_ASSUMPTION` — `ImplicitAssumptionScanner` verifies motivation and plot logic.
+  3. `HEDGE_RISK` — `VulnerabilityHedge` flags OOC, logic holes, and pacing issues; `CausalIntersectionBroker` merges worldlines.
+  4. `LOCK_RESPONSIBILITY` — output a quality score with traceable optimizations.
+  - Risk levels: `SAFE` / `WARNING` / `CRITICAL` / `FATAL`; node states: `RAW` / `STRIPPED` / `AUDITED` / `PRUNED` / `ACTIVE`.
+  - `SPLStoryGenerationEngine` + `StylisticScribe` drive generation; `DeepSeekProvider` / `MockLLM` are replaceable LLM backends.
 
-### 文书审查引擎（面向企业）
+### Document Review Engine (for enterprises)
 
-企业级文书合规审查引擎（`compliance_engine/`），零依赖、可离线运行：
+An enterprise-grade document compliance review engine (`compliance_engine/`), zero-dependency and runs offline:
 
-- 支持合同 / 制度 / 公文 / 通用四类文书的条款级规则扫描 + 文档级审计（要素完整性 / 一致性 / 权利义务对等 / 格式）。
-- `ComplianceEngine` 编排：分节 → 规则扫描 → 文档级审计 → 责任闭环 → 评分 → 报告。
-- `ResponsibilityAccount` 责任闭环锚定 + `TraceLog` 全链路可追溯；判定为决定论式（命中即判定），不输出概率。
-- `RuleEngine` 加载纯 JSON 规则库（可 `--rules-dir` 外部扩展）；四类 `Auditor` 与条款级命中互补。
-- 报告支持 HTML（可视化）/ JSON（结构化）/ Markdown（归档）三格式；完整 CLI：`audit` / `list-rules` / `demo`。
+- Supports clause-level rule scanning + document-level auditing (element completeness / consistency / rights-obligation parity / formatting) for four document types: contracts / regulations / official documents / general text.
+- `ComplianceEngine` orchestration: sectioning → rule scanning → document-level audit → responsibility loop → scoring → report.
+- `ResponsibilityAccount` responsibility-loop anchoring + `TraceLog` full-chain traceability; judgments are deterministic (hit = verdict), no probability output.
+- `RuleEngine` loads a pure JSON rule base (externally extensible via `--rules-dir`); four `Auditor` classes complement clause-level hits.
+- Reports support three formats: HTML (visualization) / JSON (structured) / Markdown (archiving); full CLI: `audit` / `list-rules` / `demo`.
 
-两款产品共享同一套决定论式审计设计语言（责任闭环锚定、风险分级、全链路可追溯），但分别面向创意叙事与企业文档两类场景。
+Both products share the same deterministic audit design language (responsibility-loop anchoring, risk grading, full-chain traceability), but target creative narrative and enterprise document scenarios respectively.
 
 **Robustness hardening (2026-08 fixes)**:
 - **Character-name plausibility filter** — `_extract_plausible_name` excludes pronouns / verb phrases / weather-scene words, preferring absence over noise: `"坚持己见" → ""`, `"他说：我们走吧" → ""`, `"林夏在评审会上坚持自研方案" → "林夏"`.
 - **Token-level worldbuilding extraction** — `WorldBuilder` pre-tokenizes on connectives / punctuation, then matches whole words with longest-suffix priority: `"青云宗与魔道势力在苍云大陆" → factions ["青云宗","魔道势力"], geography ["苍云大陆"]`, connectives are no longer swallowed.
 - **Full-text revision replacement** — `AutomaticRepairEngine` replaces all stiff transition words at once (`突然 / 莫名 / 鬼使神差 …`) and merges adjacent duplicate transition phrases.
 - **Engine isolation detection** — both engines embed `_ENGINE_FINGERPRINT` and `check_engine_isolation()`: mixing both in one process warns immediately, preventing data corruption and crashes caused by homonymous but heterogeneous data classes (`CausalNode` / `ResponsibilityAccount`, etc.) overwriting each other.
-
-**鲁棒性加固（2026-08 修复）**：
-- **角色名可信度过滤**——`_extract_plausible_name` 排除代词 / 动词短语 / 天气场景词，宁缺毋滥：`"坚持己见" → ""`、`"他说：我们走吧" → ""`、`"林夏在评审会上坚持自研方案" → "林夏"`。
-- **分词级世界观提取**——`WorldBuilder` 按连接词 / 标点预分词后整词匹配、长后缀优先：`"青云宗与魔道势力在苍云大陆" → 势力 ["青云宗","魔道势力"]、地理 ["苍云大陆"]`，连接词不再被吞入。
-- **修文全量替换**——`AutomaticRepairEngine` 一次性替换全部生硬转折词（`突然 / 莫名 / 鬼使神差 …`），并合并相邻重复的过渡短语。
-- **引擎隔离检测**——两引擎均内置 `_ENGINE_FINGERPRINT` 与 `check_engine_isolation()`：同一进程混用时立即警告，杜绝同名异构数据类（`CausalNode` / `ResponsibilityAccount` 等）互相覆盖导致的数据错乱与崩溃。
 
 </div>
 
@@ -132,8 +126,6 @@ print([s.name for s in biz.SPLStage])   # STRIP_NARRATIVE … LOCK_RESPONSIBILIT
 
 # Engine isolation detection: clear warning when both engines are mixed
 # (both engines register a fingerprint in sys.modules; any load path is detectable)
-# 引擎隔离检测：混用两引擎时给出明确警告
-# （两引擎均已向 sys.modules 注册指纹，任何加载方式都能被检测到）
 for conflict in biz.check_engine_isolation():
     print(f"⚠️ {conflict}")
 ```
@@ -143,7 +135,7 @@ Or run the built-in engines directly:
 ```bash
 python "Story Engine for Creator.py"
 python "engine for business.py"
-python -m compliance_engine audit --type contract --input 合同.txt --output 报告.html
+python -m compliance_engine audit --type contract --input contract.txt --output report.html
 python -m compliance_engine list-rules --type regulation
 python -m compliance_engine demo
 ```
@@ -179,7 +171,7 @@ STORY-ENGINE is a member of the NOHN AI ecosystem — a family of projects built
 | **NOMOS** | [nohn3043-arch/second-perspective](https://github.com/nohn3043-arch/second-perspective) (`Intelligent-Decision-Hub--Nomos` branch) | Auditable deterministic decision hub (IMDA 95/100) |
 | **SPL-G1** | [nohn3043-arch/SPL-G1](https://github.com/nohn3043-arch/SPL-G1) | Hardware causal-audit trusted computing unit (TCU) |
 | **SPL-Virtual-World-Base** | [nohn3043-arch/Second-Reality](https://github.com/nohn3043-arch/Second-Reality) | Virtual-world & metaverse infrastructure (constitution / law / bridge) |
-| **Story-Engine** | [nohn3043-arch/story-engine](https://github.com/nohn3043-arch/story-engine) | 故事引擎（创作者/大众）+ 文书审查引擎（企业） |
+| **Story-Engine** | [nohn3043-arch/story-engine](https://github.com/nohn3043-arch/story-engine) | Story Engine (creators/public) + Document Review Engine (enterprise) |
 | **Antares** | [nohn3043-arch/Antares](https://github.com/nohn3043-arch/Antares) | GFSIP v1.0 — causally-audited federated stable interoperability protocol |
 | **Anthropomorphic-Agent-Engine** | [nohn3043-arch/Anthropomorphic-Agent-Engine](https://github.com/nohn3043-arch/Anthropomorphic-Agent-Engine) | Deterministic anthropomorphic psychology engine (SPL Pure Core V8.0) |
 | **PAGES** | [nohn3043-arch/pages](https://github.com/nohn3043-arch/pages) | NOHN AI ecosystem official landing page |
